@@ -571,8 +571,29 @@ class MainWindow(tk.Tk):
 
         # Çıktı verme kısmısı
         assignments = self.mainController.get_assignments_for_output()
-        AssignmentOutputWindow(assignments)
 
+        if assignments:
+            # Atamalar başarılıysa atama sonuç penceresini göster
+            assignment_window = AssignmentOutputWindow(assignments)
+
+            # Excel export butonu ekle
+            export_button = tk.Button(
+                assignment_window.root,
+                text="Export to Excel",
+                command=lambda: self.export_to_excel(assignment_window)
+            )
+            export_button.pack(side=tk.BOTTOM, pady=10)
+
+    def export_to_excel(self, assignment_window=None):
+        """
+        Atama sonuçlarını Excel'e aktarır
+        """
+        success = self.mainController.export_assignments_to_excel()
+
+        if success:
+            messagebox.showinfo("Export Successful", "Assignments successfully exported to Excel file.")
+        else:
+            messagebox.showerror("Export Failed", "Failed to export assignments to Excel.")
     def calculate_prdct_prgrss(self, serial_number):
         self.mainController.calculate_product_progress(serial_number)
 
@@ -602,6 +623,7 @@ if __name__ == "__main__":
     app = MainWindow()
     app.mainloop()
 
+
 class AssignmentOutputWindow:
     def __init__(self, assignments):
         self.assignments = assignments
@@ -610,7 +632,9 @@ class AssignmentOutputWindow:
         self.root.geometry("1000x600")
 
         # Treeview widget'ını oluştur
-        self.tree = ttk.Treeview(self.root, columns=("Product", "Jig", "Operation", "Date", "Shift", "Time Interval", "Workers"), show="headings")
+        self.tree = ttk.Treeview(self.root,
+                                 columns=("Product", "Jig", "Operation", "Date", "Shift", "Time Interval", "Workers"),
+                                 show="headings")
         self.tree.heading("Product", text="Product")
         self.tree.heading("Jig", text="Jig")
         self.tree.heading("Operation", text="Operation")
@@ -620,10 +644,15 @@ class AssignmentOutputWindow:
         self.tree.heading("Workers", text="Workers")
         self.tree.pack(fill=tk.BOTH, expand=True)
 
+        # Scrollbar ekle
+        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        # Export to Excel butonu (buton mainscreen.py'den eklenecek)
+
         # Atamaları Treeview'a ekle
         self.populate_treeview()
-
-        self.root.mainloop()
 
     def populate_treeview(self):
         # Aynı product'a ait atamaları grupla

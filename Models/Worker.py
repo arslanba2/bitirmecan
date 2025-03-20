@@ -10,7 +10,7 @@ class Worker:
         self.__shift_schedule = None  # list(date, shift, available_hours) ExcelDataLoader yükler, AddOffDays günceller
         self.__off_days = None  # (start_off_date, end_off_date) Kullanıcıdan AddOffDays ile alınır
         self.__assignments = None  # [product_serial, operation_name, start[date, time], end[date, time]]
-
+        self.assignment_count = 0
     def set_registration_number(self, _registrationNumber):
         self.__registration_number = _registrationNumber
 
@@ -47,3 +47,8 @@ class Worker:
     def get_off_days(self):
         return self.__off_days
 
+    def get_assignment_count(self):
+        return self.assignment_count
+
+    def increment_assignment_count(self):
+        self.assignment_count += 1

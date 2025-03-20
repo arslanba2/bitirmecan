@@ -43,13 +43,15 @@ class Graph:
             # Her düğüm için süre tanımlandığından emin olalım
             for node in self.all_nodes:
                 if node not in self.duration:
-                    print(f"Uyarı: '{node}' düğümü için süre tanımlanmamış, 0 varsayılıyor.")
-                    self.duration[node] = 0
+                    print(f"Uyarı: '{node}' düğümü için süre tanımlanmamış, 0.01 varsayılıyor.")
+                    self.duration[node] = 0.01  # En az 0.01 süre
 
             # Topological sort
             queue = deque()
-            for task in self.in_degree:
-                if self.in_degree[task] == 0:
+            in_degree_copy = self.in_degree.copy()  # Orijinali değiştirmemek için kopya oluştur
+
+            for task in in_degree_copy:
+                if in_degree_copy[task] == 0:
                     queue.append(task)
 
             topological_order = []
@@ -58,15 +60,20 @@ class Graph:
                 topological_order.append(node)
 
                 for neighbor in self.graph[node]:
-                    self.in_degree[neighbor] -= 1
-                    if self.in_degree[neighbor] == 0:
+                    in_degree_copy[neighbor] -= 1
+                    if in_degree_copy[neighbor] == 0:
                         queue.append(neighbor)
 
             # Topolojik sıralama tüm düğümleri içermiyor mu kontrol et
             if len(topological_order) != len(self.all_nodes):
                 print("Uyarı: Topolojik sıralama tüm düğümleri içermiyor - döngü olabilir.")
                 missing_nodes = self.all_nodes - set(topological_order)
-                topological_order.extend(list(missing_nodes))
+
+                # Döngüsel bağımlılıkları çöz
+                for node in missing_nodes:
+                    # Bağımlılık varsa azalt
+                    self.in_degree[node] = 0
+                    topological_order.append(node)
 
             # Calculate earliest start and finish times
             earliest_start = {task: 0 for task in self.all_nodes}
@@ -80,27 +87,34 @@ class Graph:
             # Calculate latest start and finish times
             max_finish_time = max(earliest_finish.values())
             latest_finish = {task: max_finish_time for task in self.all_nodes}
-            latest_start = {task: 0 for task in self.all_nodes}
+            latest_start = {task: max_finish_time - self.duration[task] for task in self.all_nodes}
 
             # Reverse topological order for latest calculations
             for task in reversed(topological_order):
                 if not self.graph[task]:  # Eğer bağımlılık yoksa, latest_finish = max_finish_time
                     latest_finish[task] = max_finish_time
                 else:
-                    latest_finish[task] = min(latest_start[neighbor] for neighbor in self.graph[task])
+                    min_successor_start = float('inf')
+                    for neighbor in self.graph[task]:
+                        min_successor_start = min(min_successor_start, latest_start[neighbor])
+                    latest_finish[task] = min_successor_start
 
                 latest_start[task] = latest_finish[task] - self.duration[task]
 
             # Identify critical operations
             critical_operations = []
             for task in topological_order:
-                if earliest_start[task] == latest_start[task] and earliest_finish[task] == latest_finish[task]:
+                # Kritik yolu tespit etmek için slack hesapla
+                slack = latest_start[task] - earliest_start[task]
+                if abs(slack) < 0.01:  # Küçük bir epsilon değeri
                     critical_operations.append(task)
 
             return critical_operations, earliest_start, latest_finish
 
         except Exception as e:
             print(f"Kritik Yol Analizi Hatası: {e}")
+            import traceback
+            traceback.print_exc()
             return [], {}, {}
 
 

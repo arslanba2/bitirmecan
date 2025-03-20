@@ -3,7 +3,10 @@ from Models.Dictionaries import SKILLS
 from Models import Product
 from Functions import SetCriticalOperation, WorkerAssigner
 from Functions.ExcelDataLoader import ExcelDataLoader
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from datetime import datetime
+from tkinter import filedialog, messagebox
 
 
 class MainController:
@@ -132,51 +135,72 @@ class MainController:
 
     def remove_completed_predecessors(self, _sn):
         product = self.get_product(_sn)
+
+        # Önce tüm tamamlanmış operasyonları bul
+        completed_operations = []
         for operation in product.get_operations():
-            if operation.get_completed():  # Tamamlanmış operasyon ise
-                successor_of_completed_operation = operation.get_successors()  # Tamamlanmış operasyonun ardıl listesi (str)
-                opstoremove = operation.get_previous_operations()
-                opstoremove.append(operation)
-                for suc_op in successor_of_completed_operation:  # Her bir ardıl operasyon objesini dön
-                    suc_op_object = product.get_operation_by_name(suc_op)
-                    # Öncül listesini kopyala ve tamamlanmış öncülü çıkar
-                    uncomplete_predecessors_names = []
-                    for pre in suc_op_object.get_predecessors():
-                        uncomplete_predecessors_names.append(pre)
-                    for removeop in opstoremove:
-                        if removeop in uncomplete_predecessors_names:
-                            uncomplete_predecessors_names.remove(removeop)
-                    suc_op_object.set_uncompleted_predecessors(uncomplete_predecessors_names)
+            if operation.get_completed():
+                completed_operations.append(operation)
+
+        # Her operasyon için tamamlanmış öncülleri güncelle
+        for operation in product.get_operations():
+            if not operation.get_completed():  # Sadece tamamlanmamış operasyonları güncelle
+                # Öncül listelerini klonla
+                uncompleted_predecessors = []
+
+                # Tamamlanmamış öncülleri tespit et
+                for pred in operation.get_predecessors():
+                    if not pred.get_completed():
+                        uncompleted_predecessors.append(pred)
+
+                # Tamamlanmamış öncülleri güncelle
+                operation.set_uncompleted_predecessors(uncompleted_predecessors)
+
+                # Eğer artık tamamlanmamış öncül kalmadıysa, işaretleyelim
+                if len(uncompleted_predecessors) == 0:
+                    print(f"Operation {operation.get_name()} has no more incomplete predecessors")
 
     # CPM calculation
     def set_critical_operations(self, _sn):
         tasks = []
         product = self.get_product(_sn)
         calculator = SetCriticalOperation.Graph()
+
+        # Sadece tamamlanmamış operasyonları CPM hesaplamasına dahil et
         for operation in product.get_operations():
             if not operation.get_completed():
                 task = operation.get_name()
-                duration = operation.get_operating_duration()
+                # Operasyon süresini kontrol et, en az 0.01 olmasını sağla
+                duration = max(operation.get_operating_duration(), 0.01)  # En az 0.01 süre
+
+                # Sadece tamamlanmamış öncülleri ekle
                 dependencies = []
                 for op in operation.get_uncompleted_predecessors():
                     dependencies.append(op.get_name())
+
+                # Grafiğe ekle
                 calculator.add_task(task, duration, dependencies)
                 tasks.append(task)
 
+        # Kritik operasyonları hesapla
         critical_operations, earliest_start, latest_finish = calculator.find_critical_operations()
 
         print("Kritik Operasyonlar:", critical_operations)
         print("En Erken Başlama Zamanları:", earliest_start)
         print("En Geç Tamamlanma Zamanları:", latest_finish)
 
+        # Kritik operasyonları listeye ekle
         critical_op_obj_list = []
         for op_name in critical_operations:
             op_obj = product.get_operation_by_name(op_name)
-            op_obj.set_early_start(earliest_start[op_name])
-            op_obj.set_late_finish(latest_finish[op_name])
-            if op_obj.get_early_start() == 0:
-                critical_op_obj_list.append(op_obj)
-            product.append_critical_operations(critical_op_obj_list)
+            if op_obj and not op_obj.get_completed():  # Tamamlanmamış olduğundan emin ol
+                op_obj.set_early_start(earliest_start[op_name])
+                op_obj.set_late_finish(latest_finish[op_name])
+                if op_obj.get_early_start() == 0:
+                    critical_op_obj_list.append(op_obj)
+
+        # Kritik operasyonları ürüne ata
+        product.append_critical_operations(critical_op_obj_list)
 
     def sort_operations_by_duration(self):
         for product in self.__products:
@@ -190,11 +214,14 @@ class MainController:
 
     def get_all_critical_operations(self):
         critical_ops = []
+
         for product in self.__products:
             for op in product.get_critical_operations():
-                if len(op.get_uncompleted_predecessors()) == 0:
+                # Öncülleri tamamlanmış ve kendisi henüz tamamlanmamış operasyonları seç
+                if not op.get_completed() and len(op.get_uncompleted_predecessors()) == 0:
                     critical_ops.append((product, op))
-                    print(f"critical op {op.get_name()}")
+                    print(f"Critical operation: {op.get_name()} for product {product.get_serial_number()}")
+
         return critical_ops
 
     def set_schedule_attributes(self):
@@ -243,11 +270,60 @@ class MainController:
                 time_interval.available_workers = available_workers
 
     def initiate_assignment(self, critical_op_list):
+        # Compare to previous operation list - if the same, we're stuck
+        if critical_op_list == self.__critical_op_check_list and critical_op_list:
+            print("Same operation list detected - forcing resolution")
 
-        if critical_op_list == self.__critical_op_check_list:
-            print("Same operation list ended the assignment")
+            # Try a force assignment for the first operation in the list
+            product, operation = critical_op_list[0]
+            print(f"Forcing assignment for operation {operation.get_name()} of product {product.get_serial_number()}")
+
+            # Get earliest available time interval
+            intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
+            if intervals_list:
+                # Force assign to earliest available interval with any available workers
+                for interval in intervals_list:
+                    # En uygun işçileri seç
+                    selected_workers = self.select_best_workers_for_assignment(operation, interval)
+
+                    if selected_workers and len(selected_workers) >= operation.get_required_worker():
+                        # Force the assignment regardless of other constraints
+                        jig = product.get_current_jig()
+
+                        # If jig is incompatible, try to change it
+                        if not self.jig_compatibility_control(product, operation):
+                            self.change_jig(product, operation)
+                            jig = product.get_current_jig()
+
+                        # Create the assignment and make sure operation is marked as completed
+                        self.create_assignment(interval, jig, product, operation, selected_workers)
+                        operation.set_completed(True)  # Double-check it's marked as completed
+
+                        # Update dependencies
+                        product_sn = product.get_serial_number()
+                        self.remove_completed_predecessors(product_sn)
+
+                        print(f"Forced assignment successful for operation {operation.get_name()}")
+
+                        # Reset critical ops check list to break comparison cycle
+                        self.__critical_op_check_list = []
+                        # Continue with the next operation
+                        self.make_assignment_preparetions()
+                        return
+
+            # If no assignment could be made for first operation, remove it and continue
+            print(f"Could not force assignment for operation {operation.get_name()}, removing from critical path")
+            # Manually remove this operation from consideration
+            operation.set_completed(True)  # Mark as completed to remove from critical path
+
+            # Reset critical ops check list to break comparison cycle
+            self.__critical_op_check_list = []
+            self.make_assignment_preparetions()
             return
+
+        # Store current operation list for comparison in next iteration
         self.__critical_op_check_list = critical_op_list
+
         op_list = critical_op_list
         for product, operation in op_list:
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
@@ -271,14 +347,12 @@ class MainController:
                     if not self.compatible_worker_number_check(operation, interval):
                         continue  # Yeterli çalışan yok, atama yapılamaz, sonraki interval'a geç
 
-                    # Tüm kontroller başarılı, atama yap
-                    available_workers = interval.get_available_workers()
-                    # Worker'ları öncelik sırasına göre sırala
-                    sorted_workers = sorted(
-                        available_workers,
-                        key=lambda worker: self.get_skill_priority(worker.get_skills())
-                    )
-                    workers = sorted_workers[:operation.get_required_worker()]
+                    # En uygun işçileri seç
+                    selected_workers = self.select_best_workers_for_assignment(operation, interval)
+
+                    if not selected_workers:
+                        continue  # Uygun işçi yok, sonraki interval'a geç
+
                     jig = product.get_current_jig()
 
                     # Operasyonun süresi tamamlanana kadar arka arkaya interval'lara atama yap
@@ -312,7 +386,7 @@ class MainController:
                     if remaining_duration <= 0:
                         # Tüm aralıklar uygun, atama yap
                         for assigned_interval in assignment_intervals:
-                            self.create_assignment(assigned_interval, jig, product, operation, workers)
+                            self.create_assignment(assigned_interval, jig, product, operation, selected_workers)
                         break  # Operasyonun süresi tamamlandı, bir sonraki operasyona geç
 
                 else:
@@ -325,14 +399,12 @@ class MainController:
                         # Jig uygun değilse, jig değiştir
                         self.change_jig(product, operation)
 
-                    # Tüm kontroller başarılı, atama yap
-                    available_workers = interval.get_available_workers()
-                    # Worker'ları öncelik sırasına göre sırala
-                    sorted_workers = sorted(
-                        available_workers,
-                        key=lambda worker: self.get_skill_priority(worker.get_skills())
-                    )
-                    workers = sorted_workers[:operation.get_required_worker()]
+                    # En uygun işçileri seç
+                    selected_workers = self.select_best_workers_for_assignment(operation, interval)
+
+                    if not selected_workers:
+                        continue  # Uygun işçi yok, sonraki interval'a geç
+
                     jig = product.get_current_jig()
 
                     # Operasyonun süresi tamamlanana kadar arka arkaya interval'lara atama yap
@@ -366,7 +438,7 @@ class MainController:
                     if remaining_duration <= 0:
                         # Tüm aralıklar uygun, atama yap
                         for assigned_interval in assignment_intervals:
-                            self.create_assignment(assigned_interval, jig, product, operation, workers)
+                            self.create_assignment(assigned_interval, jig, product, operation, selected_workers)
                         break  # Operasyonun süresi tamamlandı, bir sonraki operasyona geç
 
         self.make_assignment_preparetions()
@@ -380,6 +452,60 @@ class MainController:
             return intervals_list[current_index + 1]
         return None  # Sonraki interval yok
 
+    def select_best_workers_for_assignment(self, operation, time_interval):
+        """
+        Operasyon için en uygun işçileri seçer:
+        1. Vardiyası uyumlu olan işçileri filtreler
+        2. Gerekli becerilere sahip işçileri filtreler
+        3. En az atama yapılmış işçileri önceliklendirip seçer
+        """
+        required_skills = operation.get_required_skills()
+        required_worker_count = operation.get_required_worker()
+
+        # Uygun beceri ve vardiyaya sahip tüm işçileri bul
+        qualified_workers = []
+
+        for worker in time_interval.available_workers:
+            # Beceri kontrolü
+            worker_skills = worker.get_skills()
+            is_qualified = False
+
+            if worker_skills in SKILLS:
+                worker_skill_set = SKILLS[worker_skills]
+                if required_skills in worker_skill_set:
+                    is_qualified = True
+            else:
+                if required_skills == worker_skills:
+                    is_qualified = True
+
+            if is_qualified:
+                # Vardiya kontrolü
+                worker_shift_schedule = worker.get_shift_schedule()
+                for schedule_entry in worker_shift_schedule:
+                    schedule_date, schedule_shift, available_hours = schedule_entry
+
+                    # Tarih ve vardiya kontrolü
+                    if schedule_date == time_interval.get_date() and schedule_shift == time_interval.get_shift():
+                        # İşçi hem beceri hem vardiya açısından uygun
+                        qualified_workers.append(worker)
+                        break
+
+        # Yeterli sayıda uygun işçi var mı kontrol et
+        if len(qualified_workers) < required_worker_count:
+            return None
+
+        # İşçilerin atama sayılarını kontrol et, eğer atama sayısı tanımlı değilse 0 olarak başlat
+        for worker in qualified_workers:
+            if not hasattr(worker, 'assignment_count'):
+                worker.assignment_count = 0
+
+        # İşçileri atama sayısına göre sırala (en az atama yapılan önce)
+        sorted_workers = sorted(qualified_workers, key=lambda w: w.assignment_count)
+
+        # Gerekli sayıda işçiyi seç
+        selected_workers = sorted_workers[:required_worker_count]
+
+        return selected_workers
     def find_latest_finish_time_of_predecessors(self, operation):
         op = operation
         latest_finish_time = None
@@ -522,6 +648,13 @@ class MainController:
         operation.set_completed(True)
         operation.set_start_datetime(inter.get_date(), inter.interval[0])
         operation.set_end_datetime(inter.get_date(), inter.interval[1])
+
+        # İşçilerin atama sayısını artır
+        for worker in workers:
+            if not hasattr(worker, 'assignment_count'):
+                worker.assignment_count = 0
+            worker.assignment_count += 1
+
         self.update_worker_shift_schedule(workers, inter)
         self.assign_workers_to_time_intervals()
 
@@ -565,15 +698,34 @@ class MainController:
 
     def make_assignment_preparetions(self):
         plist = self.__products
+
+        # Ürünlerin ilerlemesini hesapla ve öncülleri güncelle
         for product in plist:
             sn = product.get_serial_number()
             self.calculate_product_progress(sn)
             self.remove_completed_predecessors(sn)
             self.set_critical_operations(sn)
-        self.sort_operations_by_duration()
-        self.sort_products_by_progress()
-        self.initiate_assignment(self.get_all_critical_operations())
 
+        # Operasyonları süreye göre sırala
+        self.sort_operations_by_duration()
+        # Ürünleri ilerleme durumuna göre sırala
+        self.sort_products_by_progress()
+
+        # Yeni kritik operasyon listesi
+        new_critical_ops = self.get_all_critical_operations()
+
+        # Eğer kritik operasyon listesi boşsa, işlem tamamlandı demektir
+        if not new_critical_ops:
+            print("Assignment complete - no more critical operations.")
+            return
+
+        # Sonsuz döngü kontrolü için kritik operasyonları yazdır
+        print("Critical operations for next assignment:")
+        for product, op in new_critical_ops:
+            print(f"Product: {product.get_serial_number()}, Operation: {op.get_name()}")
+
+        # Atama işlemini başlat
+        self.initiate_assignment(new_critical_ops)
     def get_assignments_for_output(self):
         assignments = []
         for date_obj in self.__ScheduleObject.dates:
@@ -600,6 +752,158 @@ class MainController:
                     })
         return assignments
 
+    def export_assignments_to_excel(self, file_path=None):
+        """
+        Atama çıktılarını Excel dosyasına aktarır.
+        Her ürün için ayrı bir sayfa oluşturur.
+
+        :param file_path: Excel dosyasının kaydedileceği konum. None ise kullanıcıdan sorulur.
+        :return: Başarılı olursa True, aksi halde False
+        """
+        try:
+            # Atama çıktılarını al
+            assignments = self.get_assignments_for_output()
+
+            if not assignments:
+                print("No assignments to export.")
+                return False
+
+            # Eğer dosya yolu belirtilmemişse, kullanıcıdan al
+            if not file_path:
+                file_path = filedialog.asksaveasfilename(
+                    title="Save Excel File",
+                    filetypes=(("Excel files", "*.xlsx"), ("All files", "*.*")),
+                    defaultextension=".xlsx"
+                )
+
+                if not file_path:  # Kullanıcı iptal ettiyse
+                    return False
+
+            # Yeni bir Excel çalışma kitabı oluştur
+            wb = openpyxl.Workbook()
+            # Varsayılan sayfayı sil
+            wb.remove(wb.active)
+
+            # Ürünlere göre atamaları grupla
+            product_assignments = {}
+            for assignment in assignments:
+                product_serial = assignment["Product"]
+                if product_serial not in product_assignments:
+                    product_assignments[product_serial] = []
+                product_assignments[product_serial].append(assignment)
+
+            # Her ürün için ayrı bir sayfa oluştur
+            for product_serial, product_assignments_list in product_assignments.items():
+                # Operasyon adına göre sırala
+                sorted_assignments = sorted(product_assignments_list,
+                                            key=lambda x: int(x["Operation"]) if x["Operation"].isdigit() else x[
+                                                "Operation"])
+
+                # Yeni sayfa oluştur
+                sheet = wb.create_sheet(f"Product {product_serial}")
+
+                # Başlıkları ayarla
+                headers = ["Operation", "Jig", "Date", "Shift", "Time Interval", "Workers"]
+                for col_idx, header in enumerate(headers, 1):
+                    cell = sheet.cell(row=1, column=col_idx)
+                    cell.value = header
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal='center')
+                    cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+
+                    # Sütun genişliklerini ayarla
+                    if header == "Workers":
+                        sheet.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = 30
+                    elif header == "Time Interval":
+                        sheet.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = 15
+                    else:
+                        sheet.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = 12
+
+                # Verileri doldur
+                for row_idx, assignment in enumerate(sorted_assignments, 2):
+                    sheet.cell(row=row_idx, column=1).value = assignment["Operation"]
+                    sheet.cell(row=row_idx, column=2).value = assignment["Jig"]
+                    sheet.cell(row=row_idx, column=3).value = assignment["Date"]
+                    sheet.cell(row=row_idx, column=4).value = assignment["Shift"]
+                    sheet.cell(row=row_idx, column=5).value = assignment["Time Interval"]
+                    sheet.cell(row=row_idx, column=6).value = assignment["Workers"]
+
+                    # Hücre stillerini ayarla
+                    for col_idx in range(1, 7):
+                        cell = sheet.cell(row=row_idx, column=col_idx)
+                        cell.alignment = Alignment(horizontal='center')
+                        if row_idx % 2 == 0:
+                            cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+
+                # Özet bilgiler
+                row_idx = len(sorted_assignments) + 3
+                sheet.cell(row=row_idx, column=1).value = "Total Operations:"
+                sheet.cell(row=row_idx, column=2).value = len(sorted_assignments)
+                sheet.cell(row=row_idx, column=1).font = Font(bold=True)
+
+                # Sayfayı güzelleştir
+                thin_border = Border(
+                    left=Side(style='thin'),
+                    right=Side(style='thin'),
+                    top=Side(style='thin'),
+                    bottom=Side(style='thin')
+                )
+
+                for row in sheet.iter_rows(min_row=1, max_row=row_idx, min_col=1, max_col=6):
+                    for cell in row:
+                        cell.border = thin_border
+
+            # Özet sayfası ekle
+            summary_sheet = wb.create_sheet("Summary", 0)  # İlk sayfaya yerleştir
+            summary_sheet.cell(row=1, column=1).value = "Assignment Summary"
+            summary_sheet.cell(row=1, column=1).font = Font(bold=True, size=14)
+            summary_sheet.cell(row=1, column=1).alignment = Alignment(horizontal='center')
+            summary_sheet.merge_cells('A1:D1')
+
+            summary_sheet.cell(row=3, column=1).value = "Product"
+            summary_sheet.cell(row=3, column=2).value = "Operations Count"
+            summary_sheet.cell(row=3, column=3).value = "First Date"
+            summary_sheet.cell(row=3, column=4).value = "Last Date"
+
+            for col_idx in range(1, 5):
+                summary_sheet.cell(row=3, column=col_idx).font = Font(bold=True)
+                summary_sheet.cell(row=3, column=col_idx).alignment = Alignment(horizontal='center')
+                summary_sheet.cell(row=3, column=col_idx).fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7",
+                                                                             fill_type="solid")
+                summary_sheet.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = 15
+
+            row_idx = 4
+            for product_serial, product_assignments_list in product_assignments.items():
+                first_date = min(product_assignments_list, key=lambda x: datetime.strptime(x["Date"], "%d.%m.%Y"))[
+                    "Date"]
+                last_date = max(product_assignments_list, key=lambda x: datetime.strptime(x["Date"], "%d.%m.%Y"))[
+                    "Date"]
+
+                summary_sheet.cell(row=row_idx, column=1).value = product_serial
+                summary_sheet.cell(row=row_idx, column=2).value = len(product_assignments_list)
+                summary_sheet.cell(row=row_idx, column=3).value = first_date
+                summary_sheet.cell(row=row_idx, column=4).value = last_date
+
+                # Hücre stillerini ayarla
+                for col_idx in range(1, 5):
+                    cell = summary_sheet.cell(row=row_idx, column=col_idx)
+                    cell.alignment = Alignment(horizontal='center')
+                    if row_idx % 2 == 0:
+                        cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    cell.border = thin_border
+
+                row_idx += 1
+
+            # Dosyayı kaydet
+            wb.save(file_path)
+            print(f"Assignments exported to {file_path}")
+            return True
+
+        except Exception as e:
+            print(f"Error exporting assignments to Excel: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     def debug(self):
         print("debug")
 
