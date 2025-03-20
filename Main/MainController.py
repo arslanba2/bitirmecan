@@ -243,73 +243,18 @@ class MainController:
                 time_interval.available_workers = available_workers
 
     def initiate_assignment(self, critical_op_list):
-        # Check if we need to initialize or reset the attempts tracking
-        if not hasattr(self, '_assignment_attempts'):
-            self._assignment_attempts = {}
 
-        # Update attempt counter for each operation in the critical list
-        for product, operation in critical_op_list:
-            op_key = (product.get_serial_number(), operation.get_name())
-            self._assignment_attempts[op_key] = self._assignment_attempts.get(op_key, 0) + 1
-
-            # If we've tried this operation too many times (e.g., 3 attempts), mark it as completed
-            # to prevent it from being selected again, but log this for debugging
-            if self._assignment_attempts[op_key] > 3:
-                print(f"Warning: Operation {operation.get_name()} for product {product.get_serial_number()} "
-                      f"has been attempted {self._assignment_attempts[op_key]} times without success. "
-                      f"Marking as completed to prevent infinite loop.")
-                operation.set_completed(True)
-
-        # Check if there are any operations left to assign
-        unassigned_ops_exist = False
-        for product in self.__products:
-            for op in product.get_operations():
-                if not op.get_completed() and len(op.get_uncompleted_predecessors()) == 0:
-                    unassigned_ops_exist = True
-                    break
-            if unassigned_ops_exist:
-                break
-
-        # If no operations can be assigned, we're done
-        if not unassigned_ops_exist:
-            print("No more operations can be assigned")
+        if critical_op_list == self.__critical_op_check_list:
+            print("Same operation list ended the assignment")
             return
-
-        # Check for empty critical list but assignable operations exist
-        if not critical_op_list and unassigned_ops_exist:
-            print("Critical operation list is empty but assignable operations exist - finding operations to assign")
-            assignable_ops = []
-            for product in self.__products:
-                for op in product.get_operations():
-                    if not op.get_completed() and len(op.get_uncompleted_predecessors()) == 0:
-                        assignable_ops.append((product, op))
-
-            if assignable_ops:
-                critical_op_list = assignable_ops
-
-        # Update the check list for the next iteration
         self.__critical_op_check_list = critical_op_list
-
-        # Original assignment logic continues from here
         op_list = critical_op_list
         for product, operation in op_list:
-            # Skip if this operation has been artificially marked as completed
-            if operation.get_completed():
-                continue
-
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
             # 1. Önceki operasyonların en geç bitiş zamanını bul
             latest_finish_time = self.find_latest_finish_time_of_predecessors(operation)
             # 2. Interval listesini en geç bitiş zamanından sonraki aralıklarla sınırla
             filtered_intervals = self.filter_intervals_after_time(intervals_list, latest_finish_time)
-
-            # If no suitable intervals found, continue to next operation
-            if not filtered_intervals:
-                print(
-                    f"No suitable intervals found for operation {operation.get_name()} of product {product.get_serial_number()}")
-                continue
-
-            assignment_made = False  # Flag to track if we successfully made an assignment
 
             for interval in filtered_intervals:
                 # 1. Önceki operasyonların bu aralıkta olup olmadığını kontrol et
@@ -333,11 +278,6 @@ class MainController:
                         available_workers,
                         key=lambda worker: self.get_skill_priority(worker.get_skills())
                     )
-
-                    # Check if we have enough workers
-                    if len(sorted_workers) < operation.get_required_worker():
-                        continue  # Not enough workers, try next interval
-
                     workers = sorted_workers[:operation.get_required_worker()]
                     jig = product.get_current_jig()
 
@@ -373,7 +313,6 @@ class MainController:
                         # Tüm aralıklar uygun, atama yap
                         for assigned_interval in assignment_intervals:
                             self.create_assignment(assigned_interval, jig, product, operation, workers)
-                        assignment_made = True  # Successfully made an assignment
                         break  # Operasyonun süresi tamamlandı, bir sonraki operasyona geç
 
                 else:
@@ -393,11 +332,6 @@ class MainController:
                         available_workers,
                         key=lambda worker: self.get_skill_priority(worker.get_skills())
                     )
-
-                    # Check if we have enough workers
-                    if len(sorted_workers) < operation.get_required_worker():
-                        continue  # Not enough workers, try next interval
-
                     workers = sorted_workers[:operation.get_required_worker()]
                     jig = product.get_current_jig()
 
@@ -433,16 +367,8 @@ class MainController:
                         # Tüm aralıklar uygun, atama yap
                         for assigned_interval in assignment_intervals:
                             self.create_assignment(assigned_interval, jig, product, operation, workers)
-                        assignment_made = True  # Successfully made an assignment
                         break  # Operasyonun süresi tamamlandı, bir sonraki operasyona geç
 
-            # If no assignment was made for this operation after trying all intervals,
-            # log this fact for debugging
-            if not assignment_made:
-                print(
-                    f"Warning: Could not assign operation {operation.get_name()} for product {product.get_serial_number()}")
-
-        # Continue with the assignment preparation for the next round
         self.make_assignment_preparetions()
 
     def get_next_interval(self, current_interval, intervals_list):
