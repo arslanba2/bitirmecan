@@ -636,7 +636,12 @@ class AssignmentOutputWindow:
 
         # Treeview'a atamaları ekle
         for product_serial, assignments in product_assignments.items():
-            for assignment in assignments:
+            # Operasyon adına göre sırala (operasyon adları genellikle sayısal olduğu için)
+            sorted_assignments = sorted(assignments,
+                                        key=lambda x: int(x["Operation"]) if x["Operation"].isdigit() else x[
+                                            "Operation"])
+
+            for assignment in sorted_assignments:
                 self.tree.insert("", tk.END, values=(
                     assignment["Product"],
                     assignment["Jig"],
