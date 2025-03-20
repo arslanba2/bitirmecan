@@ -6,7 +6,6 @@ from Functions.ExcelDataLoader import ExcelDataLoader
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from datetime import datetime
-from tkinter import filedialog, messagebox
 
 
 class MainController:
@@ -770,6 +769,7 @@ class MainController:
 
             # Eğer dosya yolu belirtilmemişse, kullanıcıdan al
             if not file_path:
+                from tkinter import filedialog
                 file_path = filedialog.asksaveasfilename(
                     title="Save Excel File",
                     filetypes=(("Excel files", "*.xlsx"), ("All files", "*.*")),
