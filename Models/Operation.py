@@ -25,9 +25,16 @@ class Operation:
         self.__late_start = float('inf')
         self.__late_finish = float('inf')
         self.__slack = None
+        self.__remaining_duration = None
 
     def set_name(self, _name):
         self.__name = _name
+
+    def set_remaining_duration(self, duration):
+        self.__remaining_duration = duration
+
+    def get_remaining_duration(self):
+        return self.__remaining_duration
 
     def get_name(self):
         return self.__name

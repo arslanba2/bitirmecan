@@ -82,8 +82,9 @@ class MainController:
     def calculate_operating_duration(self, sn):
         product = self.get_product(sn)
         for operation in product.get_operations():
-            duration = operation.get_required_man_hours()/(7.5*operation.get_required_worker())
+            duration = operation.get_required_man_hours() / (7.5 * operation.get_required_worker())
             operation.set_operating_duration(duration)
+            operation.set_remaining_duration(duration)  # Initialize remaining duration
 
         self.print_operation_durations()
 
@@ -268,7 +269,55 @@ class MainController:
                 # TimeInterval'ın available_workers listesini güncelle
                 time_interval.available_workers = available_workers
 
+    def previous_operation_control(self, operation, time_interval):
+        """
+        Checks if an operation can be scheduled in the given time interval
+        by verifying that all predecessors are completed and not running in the same interval.
+
+        Args:
+            operation: The operation to be scheduled
+            time_interval: The time interval to check
+
+        Returns:
+            True if the operation can be scheduled, False otherwise
+        """
+        # First check if all predecessors are completed
+        for pred in operation.get_predecessors():
+            if not pred.get_completed():
+                return False  # Cannot schedule if any predecessor is not completed
+
+        # Now check if any predecessor is scheduled to run in this interval
+        assignments = time_interval.get_assignments()
+
+        for assignment in assignments:
+            if len(assignment) >= 3:  # Make sure assignment has enough elements
+                assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
+
+                # Check if the assigned operation is a predecessor of our operation
+                for prev_op in operation.get_previous_operations():
+                    if assigned_operation.get_name() == prev_op.get_name():
+                        return False  # Predecessor is running in this interval
+
+                # Also check that we're not trying to schedule two operations that require the same predecessors
+                # (to prevent logical conflicts in scheduling)
+                for pred in assigned_operation.get_predecessors():
+                    for our_pred in operation.get_predecessors():
+                        if pred.get_name() == our_pred.get_name():
+                            # If we share predecessors and neither operation is completed,
+                            # they might be competing for the same resources
+                            if not assigned_operation.get_completed() and not operation.get_completed():
+                                return False
+
+        return True  # All checks passed, operation can be scheduled
+
     def initiate_assignment(self, critical_op_list):
+        """
+        Initiates the assignment process for critical operations.
+        Handles deadlock detection and supports partial assignment of operations.
+
+        Args:
+            critical_op_list: List of tuples (product, operation) to be scheduled
+        """
         # Compare to previous operation list - if the same, we're stuck
         if critical_op_list == self.__critical_op_check_list and critical_op_list:
             print("Same operation list detected - forcing resolution")
@@ -282,7 +331,7 @@ class MainController:
             if intervals_list:
                 # Force assign to earliest available interval with any available workers
                 for interval in intervals_list:
-                    # En uygun işçileri seç
+                    # Select best workers for assignment
                     selected_workers = self.select_best_workers_for_assignment(operation, interval)
 
                     if selected_workers and len(selected_workers) >= operation.get_required_worker():
@@ -310,136 +359,136 @@ class MainController:
                         self.make_assignment_preparetions()
                         return
 
-            # If no assignment could be made for first operation, remove it and continue
-            print(f"Could not force assignment for operation {operation.get_name()}, removing from critical path")
-            # Manually remove this operation from consideration
-            operation.set_completed(True)  # Mark as completed to remove from critical path
+                # If no assignment could be made for first operation, remove it and continue
+                print(f"Could not force assignment for operation {operation.get_name()}, removing from critical path")
+                # Manually remove this operation from consideration
+                operation.set_completed(True)  # Mark as completed to remove from critical path
 
-            # Reset critical ops check list to break comparison cycle
-            self.__critical_op_check_list = []
-            self.make_assignment_preparetions()
-            return
+                # Reset critical ops check list to break comparison cycle
+                self.__critical_op_check_list = []
+                self.make_assignment_preparetions()
+                return
 
         # Store current operation list for comparison in next iteration
         self.__critical_op_check_list = critical_op_list
 
-        op_list = critical_op_list
-        for product, operation in op_list:
+        # Process each critical operation
+        for product, operation in critical_op_list:
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
-            # 1. Önceki operasyonların en geç bitiş zamanını bul
+
+            # 1. Find the latest finish time of predecessors
             latest_finish_time = self.find_latest_finish_time_of_predecessors(operation)
-            # 2. Interval listesini en geç bitiş zamanından sonraki aralıklarla sınırla
+
+            # If latest_finish_time is None, it means some predecessors haven't been scheduled yet
+            if latest_finish_time is None:
+                print(
+                    f"Skipping operation {operation.get_name()} for product {product.get_serial_number()} - predecessors not yet scheduled")
+                continue  # Skip this operation for now
+
+            # 2. Filter intervals that start after the latest finish time
             filtered_intervals = self.filter_intervals_after_time(intervals_list, latest_finish_time)
 
-            for interval in filtered_intervals:
-                # 1. Önceki operasyonların bu aralıkta olup olmadığını kontrol et
-                if not self.previous_operation_control(operation, interval):
-                    continue  # Önceki operasyonlar bu aralıkta, atama yapılamaz, sonraki interval'a geç
+            if not filtered_intervals:
+                print(
+                    f"No valid intervals for operation {operation.get_name()} after predecessor completion time {latest_finish_time}")
+                continue  # No valid intervals available, skip this operation
 
-                # 2. Aralıkta aynı ürüne ait başka bir operasyon olup olmadığını kontrol et
-                if self.same_product_control(product, interval):
-                    # Aynı ürüne ait başka bir operasyon varsa, jig kapasitesini kontrol et
-                    if not self.check_jig_capacity(product, operation, interval):
-                        continue  # Jig kapasitesi aşılıyor, atama yapılamaz, sonraki interval'a geç
+            # Initialize variables for tracking assignments
+            remaining_duration = operation.get_operating_duration()
+            successfully_assigned = False
 
-                    # Jig kapasitesi uygunsa, yeterli sayıda çalışan olup olmadığını kontrol et
+            # Check scheduling options: first try with same product, then without same product
+            for same_product_mode in [True, False]:
+                if successfully_assigned:
+                    break
+
+                for interval in filtered_intervals:
+                    # Skip if a previous operation is still running in this interval
+                    if not self.previous_operation_control(operation, interval):
+                        continue
+
+                    # Skip this interval if we're in same_product_mode but no same product in interval,
+                    # or if we're not in same_product_mode but there is same product in interval
+                    has_same_product = self.same_product_control(product, interval)
+                    if same_product_mode != has_same_product:
+                        continue
+
+                    # If same product is already in interval, check jig capacity
+                    if has_same_product and not self.check_jig_capacity(product, operation, interval):
+                        continue
+
+                    # Verify we have enough workers
                     if not self.compatible_worker_number_check(operation, interval):
-                        continue  # Yeterli çalışan yok, atama yapılamaz, sonraki interval'a geç
+                        continue
 
-                    # En uygun işçileri seç
+                    # Handle jig compatibility
+                    current_jig = product.get_current_jig()
+                    if not has_same_product:  # Only change jig if not already using one for same product
+                        if not self.jig_compatibility_control(product, operation):
+                            self.change_jig(product, operation)
+
+                    # Get workers for this assignment
                     selected_workers = self.select_best_workers_for_assignment(operation, interval)
-
                     if not selected_workers:
-                        continue  # Uygun işçi yok, sonraki interval'a geç
+                        continue
 
+                    # Verify we can schedule the complete duration
                     jig = product.get_current_jig()
-
-                    # Operasyonun süresi tamamlanana kadar arka arkaya interval'lara atama yap
-                    remaining_duration = operation.get_operating_duration()
+                    assignment_intervals = []
                     current_interval = interval
-                    assignment_intervals = []  # Atama yapılacak interval'ları tutar
+                    assignment_duration = 0
 
-                    while remaining_duration > 0:
-                        # Ardışık interval'lar için de aynı kontrolleri yap
-                        if not self.previous_operation_control(operation, current_interval):
-                            break  # Önceki operasyonlar bu aralıkta, atama yapılamaz, döngüden çık
+                    # Try to find consecutive intervals for the full operation
+                    while assignment_duration < remaining_duration:
+                        # Verify this interval passes all constraints
+                        if (not self.previous_operation_control(operation, current_interval) or
+                                (self.same_product_control(product, current_interval) and
+                                 not self.check_jig_capacity(product, operation, current_interval)) or
+                                not self.compatible_worker_number_check(operation, current_interval)):
+                            break
 
-                        if self.same_product_control(product, current_interval):
-                            if not self.check_jig_capacity(product, operation, current_interval):
-                                break  # Jig kapasitesi aşılıyor, atama yapılamaz, döngüden çık
-
-                            if not self.compatible_worker_number_check(operation, current_interval):
-                                break  # Yeterli çalışan yok, atama yapılamaz, döngüden çık
-
-                        # Tüm kontroller başarılı, interval'ı atama listesine ekle
                         assignment_intervals.append(current_interval)
-                        remaining_duration -= 0.25  # Her interval 0.25 saat ekler
+                        assignment_duration += 0.25  # Each interval is 0.25 hours
 
-                        # Bir sonraki interval'ı bul
+                        # Look for next interval
                         next_interval = self.get_next_interval(current_interval, filtered_intervals)
                         if next_interval is None:
-                            # Sonraki interval yok, bu operasyon için atama yapılamaz
-                            break  # Döngüden çık ve bir sonraki operasyona geç
+                            break
                         current_interval = next_interval
 
-                    if remaining_duration <= 0:
-                        # Tüm aralıklar uygun, atama yap
+                    # Check if we found enough intervals for full assignment
+                    if assignment_duration >= remaining_duration:
+                        # Create assignments for each interval
                         for assigned_interval in assignment_intervals:
                             self.create_assignment(assigned_interval, jig, product, operation, selected_workers)
-                        break  # Operasyonun süresi tamamlandı, bir sonraki operasyona geç
 
-                else:
-                    # Aralıkta aynı ürüne ait başka bir operasyon yoksa, yeterli sayıda çalışan kontrolü yap
-                    if not self.compatible_worker_number_check(operation, interval):
-                        continue  # Yeterli çalışan yok, atama yapılamaz, sonraki interval'a geç
+                        # Mark operation as completed since full duration is scheduled
+                        operation.set_completed(True)
+                        successfully_assigned = True
+                        break  # Break the interval loop
 
-                    # Jig uygunluğunu kontrol et
-                    if not self.jig_compatibility_control(product, operation):
-                        # Jig uygun değilse, jig değiştir
-                        self.change_jig(product, operation)
+                    # If we can't schedule the complete operation, but we found some intervals,
+                    # still create partial assignments - this is a key improvement
+                    elif assignment_intervals and assignment_duration > 0:
+                        print(
+                            f"Partial assignment for operation {operation.get_name()}, scheduled {assignment_duration} of {remaining_duration} hours")
 
-                    # En uygun işçileri seç
-                    selected_workers = self.select_best_workers_for_assignment(operation, interval)
-
-                    if not selected_workers:
-                        continue  # Uygun işçi yok, sonraki interval'a geç
-
-                    jig = product.get_current_jig()
-
-                    # Operasyonun süresi tamamlanana kadar arka arkaya interval'lara atama yap
-                    remaining_duration = operation.get_operating_duration()
-                    current_interval = interval
-                    assignment_intervals = []  # Atama yapılacak interval'ları tutar
-
-                    while remaining_duration > 0:
-                        # Ardışık interval'lar için de aynı kontrolleri yap
-                        if not self.previous_operation_control(operation, current_interval):
-                            break  # Önceki operasyonlar bu aralıkta, atama yapılamaz, döngüden çık
-
-                        if self.same_product_control(product, current_interval):
-                            if not self.check_jig_capacity(product, operation, current_interval):
-                                break  # Jig kapasitesi aşılıyor, atama yapılamaz, döngüden çık
-
-                            if not self.compatible_worker_number_check(operation, current_interval):
-                                break  # Yeterli çalışan yok, atama yapılamaz, döngüden çık
-
-                        # Tüm kontroller başarılı, interval'ı atama listesine ekle
-                        assignment_intervals.append(current_interval)
-                        remaining_duration -= 0.25  # Her interval 0.25 saat ekler
-
-                        # Bir sonraki interval'ı bul
-                        next_interval = self.get_next_interval(current_interval, filtered_intervals)
-                        if next_interval is None:
-                            # Sonraki interval yok, bu operasyon için atama yapılamaz
-                            break  # Döngüden çık ve bir sonraki operasyona geç
-                        current_interval = next_interval
-
-                    if remaining_duration <= 0:
-                        # Tüm aralıklar uygun, atama yap
+                        # Create assignments for available intervals
                         for assigned_interval in assignment_intervals:
                             self.create_assignment(assigned_interval, jig, product, operation, selected_workers)
-                        break  # Operasyonun süresi tamamlandı, bir sonraki operasyona geç
 
+                        # Track the remaining duration needed
+                        remaining_duration -= assignment_duration
+
+                        # Don't mark as completed yet, but consider this a successful partial assignment
+                        successfully_assigned = True
+                        break  # Break the interval loop to try other operations
+
+            # If we couldn't assign this operation at all, log it
+            if not successfully_assigned:
+                print(f"Could not assign operation {operation.get_name()} for product {product.get_serial_number()}")
+
+        # Continue with preparation for the next round of assignments
         self.make_assignment_preparetions()
 
     def get_next_interval(self, current_interval, intervals_list):
@@ -505,38 +554,61 @@ class MainController:
         selected_workers = sorted_workers[:required_worker_count]
 
         return selected_workers
+
     def find_latest_finish_time_of_predecessors(self, operation):
         op = operation
         latest_finish_time = None
         intervals = self.get_ScheduleObject().get_sorted_time_intervals()
 
+        # If no predecessors, can start at the earliest possible time
         if len(op.get_previous_operations()) == 0:
-            first_interval = self.get_ScheduleObject().get_sorted_time_intervals()[0]
+            first_interval = intervals[0]
             latest_finish_time = (first_interval.get_date(), first_interval.interval[0])
-        else:
-            for interval in intervals:
-                for prev_op in op.get_previous_operations():
-                    if prev_op.get_end_datetime():  # Önceki operasyonun bitiş zamanı varsa
-                        if latest_finish_time is None or prev_op.get_end_datetime()[0] > latest_finish_time[0]:
-                            latest_finish_time = prev_op.get_end_datetime()
-                        if latest_finish_time[0] == prev_op.get_end_datetime()[0] and prev_op.get_end_datetime()[1] > \
-                                latest_finish_time[1]:
-                            latest_finish_time = prev_op.get_end_datetime()
-                    else:
-                        latest_finish_time = (interval.get_date(), interval.interval[0])
+            return latest_finish_time
+
+        # Check if all predecessors have end times
+        all_predecessors_have_end_time = True
+        for prev_op in op.get_previous_operations():
+            if not prev_op.get_end_datetime() and not prev_op.get_completed():
+                all_predecessors_have_end_time = False
+                break
+
+        # If any predecessor doesn't have an end time, this operation can't be scheduled yet
+        if not all_predecessors_have_end_time:
+            return None
+
+        # Find the latest end time among all predecessors
+        for prev_op in op.get_previous_operations():
+            # Skip if the predecessor is already marked as completed but doesn't have end_datetime
+            if prev_op.get_completed() and not prev_op.get_end_datetime():
+                continue
+
+            # If predecessor has an end_datetime, compare it with current latest
+            if prev_op.get_end_datetime():
+                if latest_finish_time is None:
+                    latest_finish_time = prev_op.get_end_datetime()
+                elif prev_op.get_end_datetime()[0] > latest_finish_time[0]:
+                    latest_finish_time = prev_op.get_end_datetime()
+                elif (prev_op.get_end_datetime()[0] == latest_finish_time[0] and
+                      prev_op.get_end_datetime()[1] > latest_finish_time[1]):
+                    latest_finish_time = prev_op.get_end_datetime()
 
         return latest_finish_time
 
+    # 2. Fix the filter_intervals_after_time method to ensure operations start strictly after predecessors end
     def filter_intervals_after_time(self, intervals_list, start_time):
         if start_time is None:
-            return intervals_list  # Eğer başlangıç zamanı yoksa, tüm interval listesini döndür
+            return []  # If no start time is found, don't schedule (empty list)
+
         filtered_intervals = []
         for interval in intervals_list:
             interval_date = interval.get_date()
-            interval_start_time = interval.interval[0]  # Interval'ın başlangıç zamanı
+            interval_start_time = interval.interval[0]  # Interval's start time
+
+            # Only include intervals that start strictly after the predecessor end time
             if interval_date > start_time[0]:
                 filtered_intervals.append(interval)
-            if interval_date == start_time[0] and interval_start_time >= start_time[1]:
+            elif interval_date == start_time[0] and interval_start_time > start_time[1]:
                 filtered_intervals.append(interval)
 
         return filtered_intervals
@@ -551,22 +623,7 @@ class MainController:
         }
         return priority_order.get(skill, 6)  # Eğer skill tanımlı değilse en düşük öncelik
 
-    def previous_operation_control(self, operation, time_interval):
-        op = operation
-        interval = time_interval
-        assignments = interval.get_assignments()
 
-        # Eğer assignments listesi boşsa, önceki operasyonlar bu aralıkta yok demektir.
-        if not assignments:
-            return True  # Atama yapılabilir
-
-        # Eğer liste boş değilse, önceki operasyonları kontrol et
-        for prev_op in op.get_previous_operations():
-            # assignments[2]'nin bir liste veya iterable olup olmadığını kontrol et
-            if len(assignments) > 2 and isinstance(assignments[2], (list, tuple)) and prev_op in assignments[2]:
-                return False  # Atama yapılamaz
-
-        return True  # Atama yapılabilir
 
     def same_product_control(self, product, time_interval):  # Buraya operasyonun ait olduğu product gönderilecek
         assignments = time_interval.get_assignments()
