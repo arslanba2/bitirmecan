@@ -290,7 +290,7 @@ class MainWindow(tk.Tk):
         # Progress window
         progress_window = tk.Toplevel(self)
         progress_window.title(f"Progress Update - {serial_number}")
-        progress_window.geometry("300x500")
+        progress_window.geometry("500x600")
 
         # Canvas and scrollbar
         pw_frame = tk.Frame(progress_window)
@@ -299,7 +299,7 @@ class MainWindow(tk.Tk):
         pw_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         pw_scrollbar = tk.Scrollbar(pw_frame, orient=tk.VERTICAL, command=pw_canvas.yview)
         pw_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        pw_canvas.configure(yscrollcommand=pw_scrollbar.set)  # Doğru değişken kullanıldı
+        pw_canvas.configure(yscrollcommand=pw_scrollbar.set)
         pw_canvas.bind("<Configure>", lambda e: pw_canvas.configure(scrollregion=pw_canvas.bbox("all")))
 
         def mouse_wheel(event):
@@ -312,11 +312,13 @@ class MainWindow(tk.Tk):
         pw_canvas.create_window((0, 0), window=content_frame, anchor="nw")
 
         # Headers
-        headers = ["Operation", "Status"]
+        headers = ["Operation", "Status", "Progress %", "Duration (days)", "Remaining"]
         for col, header in enumerate(headers):
             tk.Label(content_frame, text=header, font=("Arial", 12, "bold")).grid(row=0, column=col, padx=5, pady=5)
 
+        # Progress entries and checkboxes
         checkboxes = []
+        progress_entries = []
 
         product = self.mainController.get_product(serial_number)
         operations = product.get_operations()
@@ -324,22 +326,104 @@ class MainWindow(tk.Tk):
 
         for i in range(op_len):
             op = self.mainController.get_product(serial_number).get_operations()[i]
+
+            # Operation name
             tk.Label(content_frame, text=f"Operation {op.get_name()}").grid(row=i + 1, column=0, padx=5, pady=5)
 
+            # Status checkbox
             def on_checkbox_toggle(index=i):
                 op = self.mainController.get_product(serial_number).get_operations()[index]
                 current_state = op.get_completed()
                 new_state = not current_state
 
-                op.set_completed(new_state)
-                checkboxes[index][0].set(new_state)
-
-                if new_state:
+                # Checkbox değişimini işle
+                if new_state:  # Tamamlandı olarak işaretlendi
+                    op.set_completed(new_state)
+                    op.set_remaining_duration(0.0)  # Kalan süreyi sıfırla
+                    checkboxes[index][0].set(new_state)
+                    progress_entries[index][0].delete(0, tk.END)
+                    progress_entries[index][0].insert(0, "100")
+                    # Kalan süre etiketini güncelle
+                    remaining_label = progress_entries[index][1]
+                    remaining_label.config(text="0.00")
                     select_predecessors(index)
+                else:  # Tamamlanmadı olarak işaretlendi
+                    op.set_completed(new_state)
+                    op.set_remaining_duration(op.get_operating_duration())  # Kalan süreyi tam süreye eşitle
+                    checkboxes[index][0].set(new_state)
+                    progress_entries[index][0].delete(0, tk.END)
+                    progress_entries[index][0].insert(0, "0")
+                    # Kalan süre etiketini güncelle
+                    remaining_label = progress_entries[index][1]
+                    remaining_label.config(text=f"{op.get_remaining_duration():.2f}")
 
             checkbox_var = tk.BooleanVar(value=bool(op.get_completed()))
-            tk.Checkbutton(content_frame, variable=checkbox_var, command=on_checkbox_toggle).grid(row=i + 1, column=1, padx=5, pady=5)
+            tk.Checkbutton(content_frame, variable=checkbox_var, command=on_checkbox_toggle).grid(row=i + 1, column=1,
+                                                                                                  padx=5, pady=5)
             checkboxes.append([checkbox_var, op.get_name()])
+
+            # Progress percentage entry
+            progress_entry = tk.Entry(content_frame, width=10)
+            progress_entry.grid(row=i + 1, column=2, padx=5, pady=5)
+            if op.get_completed():
+                progress_entry.insert(0, "100")
+            else:
+                # Eğer kalan süre tam süreye eşit değilse, ilerleme hesapla
+                total_duration = op.get_operating_duration()
+                remaining = op.get_remaining_duration()
+                if total_duration > 0 and remaining < total_duration:
+                    progress = int((1 - remaining / total_duration) * 100)
+                    progress_entry.insert(0, str(progress))
+                else:
+                    progress_entry.insert(0, "0")
+
+            # Duration (days) display
+            duration_days = op.get_operating_duration()
+            tk.Label(content_frame, text=f"{duration_days:.2f}").grid(row=i + 1, column=3, padx=5, pady=5)
+
+            # Remaining duration display
+            remaining_label = tk.Label(content_frame, text=f"{op.get_remaining_duration():.2f}")
+            remaining_label.grid(row=i + 1, column=4, padx=5, pady=5)
+
+            # Store entry and label widgets
+            progress_entries.append([progress_entry, remaining_label])
+
+            # Progress değişimini işleme fonksiyonu
+            def update_progress(event, index=i):
+                entry = progress_entries[index][0]
+                try:
+                    progress_value = float(entry.get().strip())
+                    if progress_value < 0:
+                        progress_value = 0
+                    elif progress_value > 100:
+                        progress_value = 100
+
+                    op = self.mainController.get_product(serial_number).get_operations()[index]
+                    # Kalan süreyi hesapla ve güncelle
+                    self.mainController.update_operation_remaining_duration(op, progress_value)
+
+                    # Checkbox durumunu güncelle
+                    if progress_value == 100:
+                        checkboxes[index][0].set(True)
+                        op.set_completed(True)
+                        # Öncülleri otomatik tamamla
+                        select_predecessors(index)
+                    else:
+                        checkboxes[index][0].set(False)
+                        op.set_completed(False)
+
+                    # Kalan süre etiketini güncelle
+                    remaining_label = progress_entries[index][1]
+                    remaining_label.config(text=f"{op.get_remaining_duration():.2f}")
+
+                except ValueError:
+                    # Geçersiz değer girilirse, sıfırla
+                    entry.delete(0, tk.END)
+                    entry.insert(0, "0")
+
+            # Progress entry'ye değişiklik algılama ekle
+            progress_entry.bind("<FocusOut>", lambda event, idx=i: update_progress(event, idx))
+            progress_entry.bind("<Return>", lambda event, idx=i: update_progress(event, idx))
 
         def select_predecessors(index):
             selected_op_name = checkboxes[index][1]
@@ -348,17 +432,29 @@ class MainWindow(tk.Tk):
             for pre in selected_op_predecessors:
                 if not pre.get_completed():  # Eğer öncül tamamlanmamışsa
                     pre.set_completed(True)  # Öncül operasyonu tamamlandı olarak işaretle
+                    pre.set_remaining_duration(0)  # Kalan süreyi 0 yap
 
                     # Öncül operasyonun checkbox'ını güncelle
-                    for checkbox in checkboxes:
+                    for i, checkbox in enumerate(checkboxes):
                         if checkbox[1] == pre.get_name():
                             checkbox[0].set(True)  # Checkbox'ı işaretle
+                            if i < len(progress_entries):
+                                progress_entries[i][0].delete(0, tk.END)
+                                progress_entries[i][0].insert(0, "100")
+                                progress_entries[i][1].config(text="0.00")
 
-        # Save button (Test amaçlı)
-        save_button = tk.Button(progress_window, text="Save Changes", command=lambda : self.saveandclose(progress_window) )
+        # Save button
+        save_button = tk.Button(progress_window, text="Save Changes",
+                                command=lambda: self.save_progress_changes(progress_window, serial_number))
         save_button.pack(side=tk.BOTTOM, pady=10)
 
         progress_window.mainloop()
+
+    def save_progress_changes(self, progress_window, serial_number):
+        self.mainController.calculate_product_progress(serial_number)
+        self.mainController.remove_completed_predecessors(serial_number)
+        self.mainController.set_critical_operations(serial_number)
+        progress_window.destroy()
 
     def saveandclose(self, progress_window):
         progress_window.destroy()  # Pencereyi kapat
