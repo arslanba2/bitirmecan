@@ -24,15 +24,16 @@ class MainController:
         self.__assigned_operations = {}
         self.__operation_workers = {}
 
-    def is_operation_assigned_to_interval(self, operation_name, time_interval):
-        """Checks if an operation is already assigned to a time interval"""
+    def is_operation_assigned_to_interval(self, operation_name, time_interval, product=None):
+        """Checks if an operation is already assigned to a time interval, optionally for a specific product"""
         # Check the current assignments in the time interval
         for assignment in time_interval.get_assignments():
             if len(assignment) >= 3:  # Make sure assignment has enough elements
                 assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
                 if assigned_operation.get_name() == operation_name:
-                    return True
-
+                    # If product is specified, check if it matches
+                    if product is None or assigned_product == product:
+                        return True
         return False
 
     def add_operation_assignment(self, operation_name, time_interval, workers_count):
@@ -264,8 +265,16 @@ class MainController:
     def get_all_critical_operations(self):
         critical_ops = []
         seen_operations = set()  # Aynı isimdeki operasyonları takip etmek için
+        product_op_count = {}  # Her ürün için atanan operasyon sayısını takip etmek için
+
+        # Önce her ürün için kritik operasyonları topla
+        product_critical_ops = {}
 
         for product in self.__products:
+            product_sn = product.get_serial_number()
+            product_op_count[product_sn] = 0
+            product_critical_ops[product_sn] = []
+
             for op in product.get_critical_operations():
                 # Kalan süresi olan operasyonları kontrol et
                 has_remaining_time = op.get_remaining_duration() is not None and op.get_remaining_duration() > 0.001
@@ -281,11 +290,33 @@ class MainController:
                     # Aynı isimde bir operasyon daha önce eklenmiş mi kontrol et
                     if op.get_name() not in seen_operations:
                         seen_operations.add(op.get_name())
-                        critical_ops.append((product, op))
+                        product_critical_ops[product_sn].append((product, op))
                         print(
-                            f"Critical operation: {op.get_name()} for product {product.get_serial_number()}, remaining: {op.get_remaining_duration()}")
+                            f"Critical operation: {op.get_name()} for product {product_sn}, remaining: {op.get_remaining_duration()}")
                     else:
                         print(f"Skipping duplicate critical operation: {op.get_name()}")
+
+        # Şimdi ürünler arasında dönüşümlü olarak operasyon seç
+        # Önce ürünleri progress'e göre sırala (progress'i düşük olanlar önce)
+        products_by_progress = sorted(self.__products, key=lambda p: p.get_progress() or 0)
+
+        # Her üründen sırayla birer operasyon ekleyerek ilerleme sağla
+        while any(product_critical_ops.values()):
+            for product in products_by_progress:
+                product_sn = product.get_serial_number()
+                if product_critical_ops[product_sn]:
+                    # Bu üründen bir operasyon al ve ana listeye ekle
+                    critical_ops.append(product_critical_ops[product_sn].pop(0))
+                    product_op_count[product_sn] += 1
+
+                    # Eğer bir üründen yeterince operasyon eklediyse ara
+                    if product_op_count[product_sn] >= 2 and any(len(ops) > 0 for ops in product_critical_ops.values()):
+                        break
+
+        print("Critical operations for scheduling, balanced across products:")
+        for product, op in critical_ops:
+            print(
+                f"Product: {product.get_serial_number()}, Operation: {op.get_name()}, Remaining: {op.get_remaining_duration()}")
 
         return critical_ops
 
@@ -353,7 +384,7 @@ class MainController:
                 # TimeInterval'ın available_workers listesini güncelle
                 time_interval.available_workers = available_workers
 
-    def previous_operation_control(self, operation, time_interval):
+    def previous_operation_control(self, operation, time_interval, product=None):
         """
         Checks if an operation can be scheduled in the given time interval.
         Verifies that all predecessors are completed and not running in the same interval.
@@ -362,10 +393,23 @@ class MainController:
         Args:
             operation: The operation to be scheduled
             time_interval: The time interval to check
+            product: The product this operation belongs to (added parameter)
 
         Returns:
             True if the operation can be scheduled, False otherwise
         """
+        # If product wasn't passed, get it from the operation's context
+        # This maintains compatibility with existing code
+        if product is None:
+            # Find the product that contains this operation
+            for p in self.__products:
+                if operation in p.get_operations():
+                    product = p
+                    break
+
+        if product is None:
+            print(f"Warning: Could not determine product for operation {operation.get_name()}")
+
         # Check if this operation is already assigned to this interval
         if self.is_operation_assigned_to_interval(operation.get_name(), time_interval):
             print(f"Operation {operation.get_name()} already assigned to this interval in previous_operation_control")
@@ -378,32 +422,36 @@ class MainController:
                 assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
 
                 # Check if the same operation is already assigned in this interval
-                if assigned_operation.get_name() == operation.get_name():
-                    print(f"Operation {operation.get_name()} already has an existing assignment in this interval")
+                if assigned_operation.get_name() == operation.get_name() and assigned_product == product:
+                    print(
+                        f"Operation {operation.get_name()} for product {product.get_serial_number()} already has an existing assignment in this interval")
                     return False
 
-                # Check if the assigned operation is a predecessor of our operation
-                for prev_op in operation.get_previous_operations():
-                    if assigned_operation.get_name() == prev_op.get_name():
-                        print(f"Predecessor {prev_op.get_name()} running in this interval")
-                        return False  # Predecessor is running in this interval
+                # For the SAME product, check if any predecessor is running
+                if assigned_product == product:
+                    # Check if the assigned operation is a predecessor of our operation
+                    for prev_op in operation.get_previous_operations():
+                        if assigned_operation.get_name() == prev_op.get_name():
+                            print(
+                                f"Predecessor {prev_op.get_name()} running in this interval for product {product.get_serial_number()}")
+                            return False  # Predecessor is running in this interval
 
-                # Also check that we're not trying to schedule two operations that require the same predecessors
-                # (to prevent logical conflicts in scheduling)
-                for pred in assigned_operation.get_predecessors():
-                    for our_pred in operation.get_predecessors():
-                        if pred.get_name() == our_pred.get_name():
-                            # If we share predecessors and neither operation is completed,
-                            # they might be competing for the same resources
-                            if not assigned_operation.get_completed() and not operation.get_completed():
-                                print(
-                                    f"Operations {operation.get_name()} and {assigned_operation.get_name()} share predecessor {pred.get_name()}")
-                                return False
+                    # Only check shared predecessors within the same product
+                    for pred in assigned_operation.get_predecessors():
+                        for our_pred in operation.get_predecessors():
+                            if pred.get_name() == our_pred.get_name():
+                                # If we share predecessors and neither operation is completed,
+                                # they might be competing for the same resources
+                                if not assigned_operation.get_completed() and not operation.get_completed():
+                                    print(
+                                        f"Operations {operation.get_name()} and {assigned_operation.get_name()} share predecessor {pred.get_name()} for product {product.get_serial_number()}")
+                                    return False
 
         # First check if all predecessors are completed
         for pred in operation.get_predecessors():
             if not pred.get_completed():
-                print(f"Predecessor {pred.get_name()} not completed")
+                print(
+                    f"Predecessor {pred.get_name()} not completed for operation {operation.get_name()} of product {product.get_serial_number() if product else 'unknown'}")
                 return False  # Cannot schedule if any predecessor is not completed
 
         return True  # All checks passed, operation can be scheduled
@@ -429,8 +477,8 @@ class MainController:
             if intervals_list:
                 # Force assign to earliest available interval with any available workers
                 for interval in intervals_list:
-                    # Check if the operation is already assigned to this interval
-                    if self.is_operation_assigned_to_interval(operation.get_name(), interval):
+                    # Check if the operation is already assigned to this interval for this product
+                    if self.is_operation_assigned_to_interval(operation.get_name(), interval, product):
                         print(f"Operation {operation.get_name()} already assigned to this interval - skipping")
                         continue
 
@@ -479,8 +527,8 @@ class MainController:
         for product, operation in critical_op_list:
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
 
-            # 1. Find the latest finish time of predecessors
-            latest_finish_time = self.find_latest_finish_time_of_predecessors(operation)
+            # 1. Find the latest finish time of predecessors (within the same product)
+            latest_finish_time = self.find_latest_finish_time_of_predecessors(operation, product)
 
             # If latest_finish_time is None, it means some predecessors haven't been scheduled yet
             if latest_finish_time is None:
@@ -504,7 +552,8 @@ class MainController:
                 remaining_duration = operation.get_operating_duration()
                 operation.set_remaining_duration(remaining_duration)  # Make sure remaining_duration is set
 
-            print(f"Operation {operation.get_name()} has remaining duration: {remaining_duration}")
+            print(
+                f"Operation {operation.get_name()} for product {product.get_serial_number()} has remaining duration: {remaining_duration}")
 
             successfully_assigned = False
 
@@ -524,14 +573,15 @@ class MainController:
                         if days_difference > max_days_to_consider:
                             continue
 
-                    # Check if this operation is already assigned to this interval
-                    if self.is_operation_assigned_to_interval(operation.get_name(), interval):
+                    # Check if this operation is already assigned to this interval for this product
+                    if self.is_operation_assigned_to_interval(operation.get_name(), interval, product):
                         print(
                             f"Operation {operation.get_name()} already assigned to interval {interval.get_date()} {interval.interval[0]}-{interval.interval[1]}")
                         continue  # Skip this interval
 
                     # Skip if a previous operation is still running in this interval
-                    if not self.previous_operation_control(operation, interval):
+                    # Pass the product to ensure proper context for predecessor checks
+                    if not self.previous_operation_control(operation, interval, product):
                         continue
 
                     # Skip this interval if we're in same_product_mode but no same product in interval,
@@ -575,8 +625,8 @@ class MainController:
                         if days_difference > max_days_to_consider:
                             break
 
-                        # Check if this operation is already assigned to this interval
-                        if self.is_operation_assigned_to_interval(operation.get_name(), current_interval):
+                        # Check if this operation is already assigned to this interval for this product
+                        if self.is_operation_assigned_to_interval(operation.get_name(), current_interval, product):
                             print(
                                 f"Operation {operation.get_name()} already assigned to interval {current_interval.get_date()} {current_interval.interval[0]}-{current_interval.interval[1]}")
                             # Move to next interval
@@ -586,8 +636,8 @@ class MainController:
                             current_interval = next_interval
                             continue
 
-                        # Verify this interval passes all constraints
-                        if (not self.previous_operation_control(operation, current_interval) or
+                        # Verify this interval passes all constraints - pass product context
+                        if (not self.previous_operation_control(operation, current_interval, product) or
                                 (self.same_product_control(product, current_interval) and
                                  not self.check_jig_capacity(product, operation, current_interval)) or
                                 not self.compatible_worker_number_check(operation, current_interval)):
@@ -615,7 +665,7 @@ class MainController:
                     # Check if we found enough intervals for full assignment
                     if assignment_intervals and assignment_duration > 0:
                         print(
-                            f"Creating assignments for operation {operation.get_name()}, duration: {assignment_duration} of {remaining_duration}")
+                            f"Creating assignments for operation {operation.get_name()} of product {product.get_serial_number()}, duration: {assignment_duration} of {remaining_duration}")
 
                         # Create assignments for each interval with their corresponding workers
                         assignments_created = 0
@@ -625,7 +675,8 @@ class MainController:
                                 assignments_created += 1
 
                         if assignments_created == 0:
-                            print(f"Failed to create any assignments for operation {operation.get_name()}")
+                            print(
+                                f"Failed to create any assignments for operation {operation.get_name()} of product {product.get_serial_number()}")
                             continue  # Try another interval
 
                         # Update remaining duration based on the actual assignments created
@@ -638,12 +689,13 @@ class MainController:
                             operation.set_completed(True)
                             operation.set_remaining_duration(0)
                             successfully_assigned = True
-                            print(f"Operation {operation.get_name()} fully assigned and completed")
+                            print(
+                                f"Operation {operation.get_name()} of product {product.get_serial_number()} fully assigned and completed")
                             break  # Break the interval loop
                         else:
                             # Partial assignment - keep looking for more intervals
                             print(
-                                f"Partial assignment for operation {operation.get_name()}, remaining: {new_remaining} hours")
+                                f"Partial assignment for operation {operation.get_name()} of product {product.get_serial_number()}, remaining: {new_remaining} hours")
                             # If we've assigned some time but not all, continue with next interval
                             if (assignment_duration < remaining_duration) and (assignments_created > 0):
                                 remaining_duration = new_remaining
@@ -846,7 +898,7 @@ class MainController:
 
         return selected_workers
 
-    def find_latest_finish_time_of_predecessors(self, operation):
+    def find_latest_finish_time_of_predecessors(self, operation, product=None):
         op = operation
         latest_finish_time = None
         intervals = self.get_ScheduleObject().get_sorted_time_intervals()
@@ -857,19 +909,27 @@ class MainController:
             latest_finish_time = (first_interval.get_date(), first_interval.interval[0])
             return latest_finish_time
 
-        # Check if all predecessors have end times
+        # Only consider predecessors from the same product
         all_predecessors_have_end_time = True
+        product_predecessors = []
+
+        # Get all valid predecessors for this product
         for prev_op in op.get_previous_operations():
+            # Skip if the predecessor doesn't belong to this product
+            if product and prev_op not in product.get_operations():
+                continue
+
+            product_predecessors.append(prev_op)
             if not prev_op.get_end_datetime() and not prev_op.get_completed():
                 all_predecessors_have_end_time = False
                 break
 
-        # If any predecessor doesn't have an end time, this operation can't be scheduled yet
+        # If any valid predecessor doesn't have an end time, this operation can't be scheduled yet
         if not all_predecessors_have_end_time:
             return None
 
-        # Find the latest end time among all predecessors
-        for prev_op in op.get_previous_operations():
+        # Find the latest end time among all valid predecessors
+        for prev_op in product_predecessors:
             # Skip if the predecessor is already marked as completed but doesn't have end_datetime
             if prev_op.get_completed() and not prev_op.get_end_datetime():
                 continue
@@ -891,7 +951,49 @@ class MainController:
         if start_time is None:
             return []  # If no start time is found, don't schedule (empty list)
 
+        # Tercih edilen vardiya tipini al (I1, I2, I3)
+        preferred_shift = self.screenController.get_starting_shift()
+
+        # İlk gün ve vardiyayı bul
+        first_day = None
+        if intervals_list:
+            first_day = intervals_list[0].get_date()
+
         filtered_intervals = []
+
+        # Eğer önceki operasyonlar daha önce tamamlanmışsa ve ilk gündeysek
+        if start_time is None or (first_day and (start_time[0] < first_day or
+                                                 (start_time[0] == first_day and start_time[1] <=
+                                                  intervals_list[0].interval[0]))):
+            # Önce ilk gün tercih edilen vardiyaya ait aralıkları ekle
+            first_day_intervals = {shift: [] for shift in ["I1", "I2", "I3"]}
+            other_intervals = []
+
+            for interval in intervals_list:
+                if interval.get_date() == first_day:
+                    first_day_intervals[interval.get_shift()].append(interval)
+                else:
+                    other_intervals.append(interval)
+
+            # Tercih edilen vardiyadan başlayarak, ilk gün için vardiyaları sırala
+            shift_order = []
+            if preferred_shift == "I1":
+                shift_order = ["I1", "I2", "I3"]
+            elif preferred_shift == "I2":
+                shift_order = ["I2", "I3", "I1"]
+            elif preferred_shift == "I3":
+                shift_order = ["I3", "I1", "I2"]
+
+            # İlk gün vardiyalarını tercih sırasına göre ekle
+            for shift in shift_order:
+                filtered_intervals.extend(first_day_intervals[shift])
+
+            # Diğer günlerin aralıklarını ekle
+            filtered_intervals.extend(other_intervals)
+
+            return filtered_intervals
+
+        # Normal durum: önceki operasyonların tamamlanma zamanından sonraki aralıkları filtrele
         for interval in intervals_list:
             interval_date = interval.get_date()
             interval_start_time = interval.interval[0]  # Interval's start time
@@ -1522,3 +1624,6 @@ class MainController:
 if __name__ == "__main__":
     main = MainController()
     main.run_GUI()
+    print("batushka")
+
+
