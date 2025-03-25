@@ -532,6 +532,8 @@ class MainWindow(tk.Tk):
             widget.destroy()
         self.update_off_days_list()
 
+
+
     def update_off_days_list(self):
         for worker in self.mainController.get_workers():
             if worker.get_off_days() != None:
@@ -678,7 +680,15 @@ class MainWindow(tk.Tk):
                 text="Export to Excel",
                 command=lambda: self.export_to_excel(assignment_window)
             )
-            export_button.pack(side=tk.BOTTOM, pady=10)
+            export_button.pack(side=tk.BOTTOM, pady=5)
+
+            # Gantt Chart butonu ekle
+            gantt_button = tk.Button(
+                assignment_window.root,
+                text="Export Gantt Chart",
+                command=lambda: self.export_gantt_to_excel(assignment_window)
+            )
+            gantt_button.pack(side=tk.BOTTOM, pady=5)
 
     def export_to_excel(self, assignment_window=None):
         """
@@ -690,6 +700,17 @@ class MainWindow(tk.Tk):
             messagebox.showinfo("Export Successful", "Assignments successfully exported to Excel file.")
         else:
             messagebox.showerror("Export Failed", "Failed to export assignments to Excel.")
+
+    def export_gantt_to_excel(self, assignment_window=None):
+        """
+        Sadece Gantt şemasını ayrı bir Excel dosyasına aktarır
+        """
+        success = self.mainController.export_gantt_chart_to_excel()
+
+        if success:
+            messagebox.showinfo("Export Successful", "Gantt chart successfully exported to Excel file.")
+        else:
+            messagebox.showerror("Export Failed", "Failed to export Gantt chart to Excel.")
     def calculate_prdct_prgrss(self, serial_number):
         self.mainController.calculate_product_progress(serial_number)
 
@@ -745,7 +766,11 @@ class AssignmentOutputWindow:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.configure(yscrollcommand=scrollbar.set)
 
-        # Export to Excel butonu (buton mainscreen.py'den eklenecek)
+        # Button Frame oluştur
+        button_frame = tk.Frame(self.root)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+
+        # Export butonları için boşluk bırak - mainscreen.py'deki butonlar buraya eklenecek
 
         # Atamaları Treeview'a ekle
         self.populate_treeview()

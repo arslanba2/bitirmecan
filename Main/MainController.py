@@ -1571,14 +1571,26 @@ class MainController:
             gantt_sheet.merge_cells('A1:E1')
             gantt_sheet.cell(row=1, column=1).alignment = Alignment(horizontal='center')
 
-            # Alt başlık
-            gantt_sheet.cell(row=3, column=1).value = "Worker"
-            gantt_sheet.cell(row=3, column=1).font = Font(bold=True)
-            gantt_sheet.cell(row=3, column=1).alignment = Alignment(horizontal='center')
+            # Alt başlık - İşçi bilgileri başlıkları
+            gantt_sheet.cell(row=3, column=1).value = "Worker Name"
+            gantt_sheet.cell(row=3, column=2).value = "Registration No"
+            gantt_sheet.cell(row=3, column=3).value = "Total Hours"
+
+            # Sütun genişliklerini ayarla
             gantt_sheet.column_dimensions['A'].width = 25  # İşçi adı sütunu genişliği
+            gantt_sheet.column_dimensions['B'].width = 15  # Sicil no sütunu genişliği
+            gantt_sheet.column_dimensions['C'].width = 12  # Toplam saat sütunu genişliği
+
+            # Stil ayarlamaları - başlıklar
+            for col in range(1, 4):
+                cell = gantt_sheet.cell(row=3, column=col)
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal='center')
+                cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+                cell.border = thin_border
 
             # Tarih ve saat başlıkları
-            col_offset = 2
+            col_offset = 4  # İlk 3 sütun işçi bilgileri için ayrıldı
             for date_idx, date_str in enumerate(sorted_dates):
                 date_col = col_offset + date_idx * (len(sorted_time_intervals) + 1)
                 date_obj = datetime.strptime(date_str, "%d.%m.%Y")
@@ -1603,9 +1615,9 @@ class MainController:
                     gantt_sheet.cell(row=3, column=time_col).alignment = Alignment(horizontal='center')
                     gantt_sheet.column_dimensions[openpyxl.utils.get_column_letter(time_col)].width = 10
 
-            # Stil ayarlamaları
+            # Stil ayarlamaları - tarih ve saat başlıkları
             for row in range(2, 4):
-                for col in range(1, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
+                for col in range(4, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
                     cell = gantt_sheet.cell(row=row, column=col)
                     if cell.value:  # Boş olmayan hücreler için
                         cell.border = thin_border
@@ -1626,6 +1638,34 @@ class MainController:
                 "AEAAAA",  # Gümüş
             ]
 
+            # Her işçi için toplam çalışma saatlerini hesapla
+            worker_total_hours = {}
+            for worker_name, data in worker_assignments.items():
+                total_hours = 0
+
+                for assignment in data["assignments"]:
+                    # Zaman aralığını parçala
+                    time_str = assignment["time"]
+                    start_time_str, end_time_str = time_str.split("-")
+
+                    # Saat ve dakikayı al
+                    start_time = datetime.strptime(start_time_str, "%H:%M").time()
+                    end_time = datetime.strptime(end_time_str, "%H:%M").time()
+
+                    # Saat farkını hesapla (saatler ve dakikalar)
+                    start_minutes = start_time.hour * 60 + start_time.minute
+                    end_minutes = end_time.hour * 60 + end_time.minute
+
+                    # Gece yarısı geçişini kontrol et
+                    if end_minutes < start_minutes:  # Örneğin 23:00-01:00 durumu
+                        end_minutes += 24 * 60  # Bir günlük dakikaları ekle
+
+                    # Dakika farkını saate çevir
+                    hours_diff = (end_minutes - start_minutes) / 60
+                    total_hours += hours_diff
+
+                worker_total_hours[worker_name] = total_hours
+
             # Tüm işçiler için sırayla satır oluştur
             for worker_name, data in worker_assignments.items():
                 worker_row = row_offset
@@ -1635,6 +1675,17 @@ class MainController:
                 gantt_sheet.cell(row=worker_row, column=1).value = worker_name
                 gantt_sheet.cell(row=worker_row, column=1).alignment = Alignment(horizontal='left')
                 gantt_sheet.cell(row=worker_row, column=1).border = thin_border
+
+                # Sicil numarası
+                gantt_sheet.cell(row=worker_row, column=2).value = data["registration_number"]
+                gantt_sheet.cell(row=worker_row, column=2).alignment = Alignment(horizontal='center')
+                gantt_sheet.cell(row=worker_row, column=2).border = thin_border
+
+                # Toplam çalışma saati - doğru hesaplanmış hali
+                total_hours = worker_total_hours[worker_name]
+                gantt_sheet.cell(row=worker_row, column=3).value = round(total_hours, 2)  # 2 ondalık basamağa yuvarla
+                gantt_sheet.cell(row=worker_row, column=3).alignment = Alignment(horizontal='center')
+                gantt_sheet.cell(row=worker_row, column=3).border = thin_border
 
                 # Bu işçi için renk seç
                 if worker_name not in worker_colors:
@@ -1678,7 +1729,7 @@ class MainController:
 
             # Boş hücrelere ince kenarlık ekle
             for row in range(4, row_offset):
-                for col in range(2, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
+                for col in range(4, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
                     cell = gantt_sheet.cell(row=row, column=col)
                     if not cell.value:  # Boş hücreler için
                         cell.border = thin_border
@@ -1747,13 +1798,13 @@ class MainController:
             row_idx += 1
             for worker_name, data in worker_assignments.items():
                 assignments_count = len(data["assignments"])
-                # Toplam çalışma saatini hesapla (her atama 0.25 saat)
-                total_hours = assignments_count * 0.25
+                # Düzgün hesaplanmış toplam saat
+                total_hours = worker_total_hours[worker_name]
 
                 summary_sheet.cell(row=row_idx, column=1).value = worker_name
                 summary_sheet.cell(row=row_idx, column=2).value = data["registration_number"]
                 summary_sheet.cell(row=row_idx, column=3).value = assignments_count
-                summary_sheet.cell(row=row_idx, column=4).value = total_hours
+                summary_sheet.cell(row=row_idx, column=4).value = round(total_hours, 2)  # 2 ondalık basamağa yuvarla
 
                 # Hücre stillerini ayarla
                 for col_idx in range(1, 5):
@@ -1772,6 +1823,247 @@ class MainController:
 
         except Exception as e:
             print(f"Error exporting assignments to Excel: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def export_gantt_chart_to_excel(self, file_path=None):
+        """
+        Sadece Gantt şemasını ayrı bir Excel dosyasına aktarır.
+
+        :param file_path: Excel dosyasının kaydedileceği konum. None ise kullanıcıdan sorulur.
+        :return: Başarılı olursa True, aksi halde False
+        """
+        try:
+            # Atama çıktılarını al
+            assignments = self.get_assignments_for_output()
+            worker_assignments = self.get_worker_assignments()
+
+            if not assignments:
+                print("No assignments to export.")
+                return False
+
+            # Eğer dosya yolu belirtilmemişse, kullanıcıdan al
+            if not file_path:
+                from tkinter import filedialog
+                file_path = filedialog.asksaveasfilename(
+                    title="Save Gantt Chart Excel File",
+                    filetypes=(("Excel files", "*.xlsx"), ("All files", "*.*")),
+                    defaultextension=".xlsx"
+                )
+
+                if not file_path:  # Kullanıcı iptal ettiyse
+                    return False
+
+            # Yeni bir Excel çalışma kitabı oluştur
+            wb = openpyxl.Workbook()
+            # Varsayılan sayfayı sil
+            wb.remove(wb.active)
+
+            # Stil tanımlamaları
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+
+            # --- GANTT CHART SAYFASI ---
+            gantt_sheet = wb.create_sheet("Worker Gantt Chart")
+
+            # Tüm tarihleri topla ve sırala
+            all_dates = set()
+            for assignment in assignments:
+                all_dates.add(assignment["Date"])
+            sorted_dates = sorted(list(all_dates), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
+
+            # Tüm zaman aralıklarını topla
+            all_time_intervals = set()
+            for assignment in assignments:
+                all_time_intervals.add(assignment["Time Interval"])
+
+            # Zaman aralıklarını saatlere göre sırala
+            sorted_time_intervals = sorted(
+                list(all_time_intervals),
+                key=lambda x: datetime.strptime(x.split("-")[0], "%H:%M").time()
+            )
+
+            # Başlık satırı
+            gantt_sheet.cell(row=1, column=1).value = "Worker Gantt Chart"
+            gantt_sheet.cell(row=1, column=1).font = Font(bold=True, size=14)
+            gantt_sheet.merge_cells('A1:E1')
+            gantt_sheet.cell(row=1, column=1).alignment = Alignment(horizontal='center')
+
+            # Alt başlık - İşçi bilgileri başlıkları
+            gantt_sheet.cell(row=3, column=1).value = "Worker Name"
+            gantt_sheet.cell(row=3, column=2).value = "Registration No"
+            gantt_sheet.cell(row=3, column=3).value = "Total Hours"
+
+            # Sütun genişliklerini ayarla
+            gantt_sheet.column_dimensions['A'].width = 25  # İşçi adı sütunu genişliği
+            gantt_sheet.column_dimensions['B'].width = 15  # Sicil no sütunu genişliği
+            gantt_sheet.column_dimensions['C'].width = 12  # Toplam saat sütunu genişliği
+
+            # Stil ayarlamaları - başlıklar
+            for col in range(1, 4):
+                cell = gantt_sheet.cell(row=3, column=col)
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal='center')
+                cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+                cell.border = thin_border
+
+            # Tarih ve saat başlıkları
+            col_offset = 4  # İlk 3 sütun işçi bilgileri için ayrıldı
+            for date_idx, date_str in enumerate(sorted_dates):
+                date_col = col_offset + date_idx * (len(sorted_time_intervals) + 1)
+                date_obj = datetime.strptime(date_str, "%d.%m.%Y")
+                date_display = date_obj.strftime("%d.%m.%Y")
+
+                # Tarih başlığı
+                gantt_sheet.cell(row=2, column=date_col).value = date_display
+                gantt_sheet.cell(row=2, column=date_col).font = Font(bold=True)
+                gantt_sheet.merge_cells(
+                    start_row=2,
+                    start_column=date_col,
+                    end_row=2,
+                    end_column=date_col + len(sorted_time_intervals) - 1
+                )
+                gantt_sheet.cell(row=2, column=date_col).alignment = Alignment(horizontal='center')
+
+                # Saat aralığı başlıkları
+                for time_idx, time_interval in enumerate(sorted_time_intervals):
+                    time_col = date_col + time_idx
+                    gantt_sheet.cell(row=3, column=time_col).value = time_interval
+                    gantt_sheet.cell(row=3, column=time_col).font = Font(bold=True)
+                    gantt_sheet.cell(row=3, column=time_col).alignment = Alignment(horizontal='center')
+                    gantt_sheet.column_dimensions[openpyxl.utils.get_column_letter(time_col)].width = 10
+
+            # Stil ayarlamaları - tarih ve saat başlıkları
+            for row in range(2, 4):
+                for col in range(4, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
+                    cell = gantt_sheet.cell(row=row, column=col)
+                    if cell.value:  # Boş olmayan hücreler için
+                        cell.border = thin_border
+                        cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+
+            # İşçileri ve atamalarını ekle
+            row_offset = 4
+            worker_colors = {}  # İşçi renklerini takip etmek için
+            color_index = 0
+            color_palette = [
+                "9BC2E6",  # Açık mavi
+                "A9D08E",  # Açık yeşil
+                "FFD966",  # Sarı
+                "F4B084",  # Turuncu
+                "C9C9C9",  # Gri
+                "8EA9DB",  # Mavi
+                "FF99CC",  # Pembe
+                "AEAAAA",  # Gümüş
+            ]
+
+            # Her işçi için toplam çalışma saatlerini hesapla
+            worker_total_hours = {}
+            for worker_name, data in worker_assignments.items():
+                total_hours = 0
+
+                for assignment in data["assignments"]:
+                    # Zaman aralığını parçala
+                    time_str = assignment["time"]
+                    start_time_str, end_time_str = time_str.split("-")
+
+                    # Saat ve dakikayı al
+                    start_time = datetime.strptime(start_time_str, "%H:%M").time()
+                    end_time = datetime.strptime(end_time_str, "%H:%M").time()
+
+                    # Saat farkını hesapla (saatler ve dakikalar)
+                    start_minutes = start_time.hour * 60 + start_time.minute
+                    end_minutes = end_time.hour * 60 + end_time.minute
+
+                    # Gece yarısı geçişini kontrol et
+                    if end_minutes < start_minutes:  # Örneğin 23:00-01:00 durumu
+                        end_minutes += 24 * 60  # Bir günlük dakikaları ekle
+
+                    # Dakika farkını saate çevir
+                    hours_diff = (end_minutes - start_minutes) / 60
+                    total_hours += hours_diff
+
+                worker_total_hours[worker_name] = total_hours
+
+            # Tüm işçiler için sırayla satır oluştur
+            for worker_name, data in worker_assignments.items():
+                worker_row = row_offset
+                row_offset += 1
+
+                # İşçi adı
+                gantt_sheet.cell(row=worker_row, column=1).value = worker_name
+                gantt_sheet.cell(row=worker_row, column=1).alignment = Alignment(horizontal='left')
+                gantt_sheet.cell(row=worker_row, column=1).border = thin_border
+
+                # Sicil numarası
+                gantt_sheet.cell(row=worker_row, column=2).value = data["registration_number"]
+                gantt_sheet.cell(row=worker_row, column=2).alignment = Alignment(horizontal='center')
+                gantt_sheet.cell(row=worker_row, column=2).border = thin_border
+
+                # Toplam çalışma saati - doğru hesaplanmış hali
+                total_hours = worker_total_hours[worker_name]
+                gantt_sheet.cell(row=worker_row, column=3).value = round(total_hours, 2)  # 2 ondalık basamağa yuvarla
+                gantt_sheet.cell(row=worker_row, column=3).alignment = Alignment(horizontal='center')
+                gantt_sheet.cell(row=worker_row, column=3).border = thin_border
+
+                # Bu işçi için renk seç
+                if worker_name not in worker_colors:
+                    worker_colors[worker_name] = color_palette[color_index % len(color_palette)]
+                    color_index += 1
+
+                worker_color = worker_colors[worker_name]
+
+                # İşçinin atamalarını işle
+                for assignment in data["assignments"]:
+                    date_str = assignment["date"]
+                    time_interval = assignment["time"]
+                    operation = assignment["operation"]
+                    product = assignment["product"]
+
+                    # Tarihin indeksini bul
+                    date_idx = sorted_dates.index(date_str)
+                    # Zaman aralığının indeksini bul
+                    time_idx = sorted_time_intervals.index(time_interval)
+
+                    # Gantt hücresinin konumunu hesapla
+                    cell_col = col_offset + date_idx * (len(sorted_time_intervals) + 1) + time_idx
+
+                    # Hücreyi doldur
+                    cell = gantt_sheet.cell(row=worker_row, column=cell_col)
+                    cell.value = f"{product}-{operation}"
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.fill = PatternFill(start_color=worker_color, end_color=worker_color, fill_type="solid")
+                    cell.border = thin_border
+
+            # Açıklayıcı not ekle
+            note_row = row_offset + 2
+            gantt_sheet.cell(row=note_row, column=1).value = "Note: Each cell contains 'Product-Operation'"
+            gantt_sheet.cell(row=note_row, column=1).font = Font(italic=True)
+            gantt_sheet.merge_cells(
+                start_row=note_row,
+                start_column=1,
+                end_row=note_row,
+                end_column=5
+            )
+
+            # Boş hücrelere ince kenarlık ekle
+            for row in range(4, row_offset):
+                for col in range(4, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
+                    cell = gantt_sheet.cell(row=row, column=col)
+                    if not cell.value:  # Boş hücreler için
+                        cell.border = thin_border
+
+            # Dosyayı kaydet
+            wb.save(file_path)
+            print(f"Gantt chart exported to {file_path}")
+            return True
+
+        except Exception as e:
+            print(f"Error exporting Gantt chart to Excel: {e}")
             import traceback
             traceback.print_exc()
             return False
