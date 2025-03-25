@@ -1376,7 +1376,7 @@ class MainController:
     def export_assignments_to_excel(self, file_path=None):
         """
         Atama çıktılarını Excel dosyasına aktarır.
-        Her ürün için ayrı bir sayfa ve her işçi için ayrı bir sayfa oluşturur.
+        Her ürün için ayrı bir sayfa, her işçi için ayrı bir sayfa ve bir Gantt şeması oluşturur.
 
         :param file_path: Excel dosyasının kaydedileceği konum. None ise kullanıcıdan sorulur.
         :return: Başarılı olursa True, aksi halde False
@@ -1544,6 +1544,144 @@ class MainController:
                     for cell in row:
                         if not cell.border:
                             cell.border = thin_border
+
+            # --- GANTT CHART SAYFASI ---
+            gantt_sheet = wb.create_sheet("Worker Gantt Chart")
+
+            # Tüm tarihleri topla ve sırala
+            all_dates = set()
+            for assignment in assignments:
+                all_dates.add(assignment["Date"])
+            sorted_dates = sorted(list(all_dates), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
+
+            # Tüm zaman aralıklarını topla
+            all_time_intervals = set()
+            for assignment in assignments:
+                all_time_intervals.add(assignment["Time Interval"])
+
+            # Zaman aralıklarını saatlere göre sırala
+            sorted_time_intervals = sorted(
+                list(all_time_intervals),
+                key=lambda x: datetime.strptime(x.split("-")[0], "%H:%M").time()
+            )
+
+            # Başlık satırı
+            gantt_sheet.cell(row=1, column=1).value = "Worker Gantt Chart"
+            gantt_sheet.cell(row=1, column=1).font = Font(bold=True, size=14)
+            gantt_sheet.merge_cells('A1:E1')
+            gantt_sheet.cell(row=1, column=1).alignment = Alignment(horizontal='center')
+
+            # Alt başlık
+            gantt_sheet.cell(row=3, column=1).value = "Worker"
+            gantt_sheet.cell(row=3, column=1).font = Font(bold=True)
+            gantt_sheet.cell(row=3, column=1).alignment = Alignment(horizontal='center')
+            gantt_sheet.column_dimensions['A'].width = 25  # İşçi adı sütunu genişliği
+
+            # Tarih ve saat başlıkları
+            col_offset = 2
+            for date_idx, date_str in enumerate(sorted_dates):
+                date_col = col_offset + date_idx * (len(sorted_time_intervals) + 1)
+                date_obj = datetime.strptime(date_str, "%d.%m.%Y")
+                date_display = date_obj.strftime("%d.%m.%Y")
+
+                # Tarih başlığı
+                gantt_sheet.cell(row=2, column=date_col).value = date_display
+                gantt_sheet.cell(row=2, column=date_col).font = Font(bold=True)
+                gantt_sheet.merge_cells(
+                    start_row=2,
+                    start_column=date_col,
+                    end_row=2,
+                    end_column=date_col + len(sorted_time_intervals) - 1
+                )
+                gantt_sheet.cell(row=2, column=date_col).alignment = Alignment(horizontal='center')
+
+                # Saat aralığı başlıkları
+                for time_idx, time_interval in enumerate(sorted_time_intervals):
+                    time_col = date_col + time_idx
+                    gantt_sheet.cell(row=3, column=time_col).value = time_interval
+                    gantt_sheet.cell(row=3, column=time_col).font = Font(bold=True)
+                    gantt_sheet.cell(row=3, column=time_col).alignment = Alignment(horizontal='center')
+                    gantt_sheet.column_dimensions[openpyxl.utils.get_column_letter(time_col)].width = 10
+
+            # Stil ayarlamaları
+            for row in range(2, 4):
+                for col in range(1, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
+                    cell = gantt_sheet.cell(row=row, column=col)
+                    if cell.value:  # Boş olmayan hücreler için
+                        cell.border = thin_border
+                        cell.fill = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+
+            # İşçileri ve atamalarını ekle
+            row_offset = 4
+            worker_colors = {}  # İşçi renklerini takip etmek için
+            color_index = 0
+            color_palette = [
+                "9BC2E6",  # Açık mavi
+                "A9D08E",  # Açık yeşil
+                "FFD966",  # Sarı
+                "F4B084",  # Turuncu
+                "C9C9C9",  # Gri
+                "8EA9DB",  # Mavi
+                "FF99CC",  # Pembe
+                "AEAAAA",  # Gümüş
+            ]
+
+            # Tüm işçiler için sırayla satır oluştur
+            for worker_name, data in worker_assignments.items():
+                worker_row = row_offset
+                row_offset += 1
+
+                # İşçi adı
+                gantt_sheet.cell(row=worker_row, column=1).value = worker_name
+                gantt_sheet.cell(row=worker_row, column=1).alignment = Alignment(horizontal='left')
+                gantt_sheet.cell(row=worker_row, column=1).border = thin_border
+
+                # Bu işçi için renk seç
+                if worker_name not in worker_colors:
+                    worker_colors[worker_name] = color_palette[color_index % len(color_palette)]
+                    color_index += 1
+
+                worker_color = worker_colors[worker_name]
+
+                # İşçinin atamalarını işle
+                for assignment in data["assignments"]:
+                    date_str = assignment["date"]
+                    time_interval = assignment["time"]
+                    operation = assignment["operation"]
+                    product = assignment["product"]
+
+                    # Tarihin indeksini bul
+                    date_idx = sorted_dates.index(date_str)
+                    # Zaman aralığının indeksini bul
+                    time_idx = sorted_time_intervals.index(time_interval)
+
+                    # Gantt hücresinin konumunu hesapla
+                    cell_col = col_offset + date_idx * (len(sorted_time_intervals) + 1) + time_idx
+
+                    # Hücreyi doldur
+                    cell = gantt_sheet.cell(row=worker_row, column=cell_col)
+                    cell.value = f"{product}-{operation}"
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.fill = PatternFill(start_color=worker_color, end_color=worker_color, fill_type="solid")
+                    cell.border = thin_border
+
+            # Açıklayıcı not ekle
+            note_row = row_offset + 2
+            gantt_sheet.cell(row=note_row, column=1).value = "Note: Each cell contains 'Product-Operation'"
+            gantt_sheet.cell(row=note_row, column=1).font = Font(italic=True)
+            gantt_sheet.merge_cells(
+                start_row=note_row,
+                start_column=1,
+                end_row=note_row,
+                end_column=5
+            )
+
+            # Boş hücrelere ince kenarlık ekle
+            for row in range(4, row_offset):
+                for col in range(2, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
+                    cell = gantt_sheet.cell(row=row, column=col)
+                    if not cell.value:  # Boş hücreler için
+                        cell.border = thin_border
 
             # --- ÖZET SAYFASI ---
             summary_sheet = wb.create_sheet("Summary", 0)  # İlk sayfaya yerleştir
