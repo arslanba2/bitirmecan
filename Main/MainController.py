@@ -200,7 +200,7 @@ class MainController:
     def set_critical_operations(self, _sn):
         """
         Calculates the critical path for a product using remaining operation durations.
-        Only considers operations that are not yet completed.
+        Considers operations that are not yet completed or have remaining time.
 
         Args:
             _sn: Product serial number
@@ -209,9 +209,19 @@ class MainController:
         product = self.get_product(_sn)
         calculator = SetCriticalOperation.Graph()
 
-        # Sadece tamamlanmamış operasyonları CPM hesaplamasına dahil et
+        # Tamamlanmamış VEYA kalan süresi olan operasyonları CPM hesaplamasına dahil et
         for operation in product.get_operations():
-            if not operation.get_completed():
+            # Kalan süresi olup olmadığını kontrol et
+            has_remaining_time = operation.get_remaining_duration() is not None and operation.get_remaining_duration() > 0.001
+
+            # Tutarsızlık kontrolü - tamamlandı ama kalan süre varsa, durumu düzelt
+            if operation.get_completed() and has_remaining_time:
+                print(
+                    f"Fixing inconsistency in set_critical_operations: Operation {operation.get_name()} marked as completed but has remaining time {operation.get_remaining_duration()}")
+                operation.set_completed(False)  # Completed flag'i düzelt
+
+            # Tamamlanmamış VEYA kalan süresi olan operasyonları dahil et
+            if not operation.get_completed() or has_remaining_time:
                 task = operation.get_name()
 
                 # Operasyon süresini kontrol et, kalan süreyi kullan
@@ -243,7 +253,8 @@ class MainController:
         critical_op_obj_list = []
         for op_name in critical_operations:
             op_obj = product.get_operation_by_name(op_name)
-            if op_obj and not op_obj.get_completed():  # Tamamlanmamış olduğundan emin ol
+            if op_obj and (not op_obj.get_completed() or (
+                    op_obj.get_remaining_duration() is not None and op_obj.get_remaining_duration() > 0.001)):
                 op_obj.set_early_start(earliest_start[op_name])
                 op_obj.set_late_finish(latest_finish[op_name])
                 if op_obj.get_early_start() == 0:
