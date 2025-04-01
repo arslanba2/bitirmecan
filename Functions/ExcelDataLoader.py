@@ -121,7 +121,7 @@ class ExcelDataLoader:
         try:
             wb = openpyxl.load_workbook(self.__excel_path)
             sheet_workers = wb["Çalışan Vardiya Matrisi"]
-            sheet_qualifications = wb["Çalışan Yetenek Matrisi"]
+            sheet_fications = wb["Çalışan Yetenek Matrisi"]
             for row in range(2, sheet_workers.max_row + 1):
                 w = Worker()
                 w.set_registration_number(str(sheet_workers.cell(row=row, column=2).value))
@@ -147,12 +147,12 @@ class ExcelDataLoader:
 
                 restriction_list = []
 
-                for skill_row in range(2, sheet_qualifications.max_row + 1):
-                    skill_worker_id = str(sheet_qualifications.cell(row=skill_row, column=2).value)
+                for skill_row in range(2, sheet_fications.max_row + 1):
+                    skill_worker_id = str(sheet_fications.cell(row=skill_row, column=2).value)
                     if skill_worker_id == w.get_registration_number():
-                        skill = str(sheet_qualifications.cell(row=skill_row, column=4).value)
+                        skill = str(sheet_fications.cell(row=skill_row, column=4).value)
                         w.set_skills(skill)
-                        restriction_value = sheet_qualifications.cell(row=skill_row, column=5).value
+                        restriction_value = sheet_fications.cell(row=skill_row, column=5).value
                         if restriction_value:
                             restriction_list.append(set(str(restriction_value).split(",")))
                             w.set_restrictions(restriction_list)

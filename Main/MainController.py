@@ -1,3 +1,9 @@
+import sys
+import os
+
+# Projenin ana dizinini sys.path'e ekle
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from Screens import mainscreen
 from Models.Dictionaries import SKILLS
 from Models import Product
@@ -1327,8 +1333,12 @@ class MainController:
 
         # Atama işlemini başlat - tekrarlanan operasyonları çıkardıktan sonra
         self.initiate_assignment(unique_critical_ops)
+
     def get_assignments_for_output(self):
         assignments = []
+        today = datetime.now().strftime("%d.%m.%Y")  # Bugünün tarihi, varsayılan için
+
+        # 1. Önce normal atamaları al
         for date_obj in self.__ScheduleObject.dates:
             for time_interval in date_obj.time_intervals:
                 for assignment in time_interval.get_assignments():
@@ -1351,6 +1361,72 @@ class MainController:
                         "Time Interval": time_range,
                         "Workers": worker_names
                     })
+
+        # 2. Tamamlanmış ama atanmamış operasyonları ekle
+        assigned_operations = set()
+        for assignment in assignments:
+            assigned_operations.add((assignment["Product"], assignment["Operation"]))
+
+        for product in self.__products:
+            for operation in product.get_operations():
+                # Eğer operasyon tamamlanmış fakat atama listesinde yoksa
+                if operation.get_completed() and (
+                product.get_serial_number(), operation.get_name()) not in assigned_operations:
+                    # Bu tamamlanmış operasyon için atama yapılmamış, manuel atama oluştur
+
+                    # Excel uyumlu geçerli değerler kullan
+                    date_str = today  # Bugünkü tarihi kullan (Excel uyumlu)
+                    shift_str = "Manuel"
+                    time_range = "00:00-00:00"  # Geçerli bir zaman aralığı
+
+                    if operation.get_start_datetime() and operation.get_end_datetime():
+                        try:
+                            # Eğer operasyonun zaman bilgileri kaydedilmişse ve geçerliyse
+                            if isinstance(operation.get_start_datetime()[0], datetime):
+                                date_str = operation.get_start_datetime()[0].strftime("%d.%m.%Y")
+                            elif hasattr(operation.get_start_datetime()[0], "strftime"):
+                                date_str = operation.get_start_datetime()[0].strftime("%d.%m.%Y")
+                            else:
+                                # Bir string ise ve doğru formatta ise kullan, değilse bugünün tarihini kullan
+                                try:
+                                    # Tarih string'ini doğrula
+                                    datetime.strptime(str(operation.get_start_datetime()[0]), "%d.%m.%Y")
+                                    date_str = str(operation.get_start_datetime()[0])
+                                except ValueError:
+                                    # Geçersiz tarih formatı, bugünün tarihini kullan
+                                    date_str = today
+
+                            # Zaman aralığını formatla - geçerli zaman aralığı oluştur
+                            if hasattr(operation.get_start_datetime()[1], "strftime"):
+                                start_time = operation.get_start_datetime()[1].strftime("%H:%M")
+                            else:
+                                start_time = "00:00"  # Varsayılan başlangıç saati
+
+                            if hasattr(operation.get_end_datetime()[1], "strftime"):
+                                end_time = operation.get_end_datetime()[1].strftime("%H:%M")
+                            else:
+                                end_time = "00:00"  # Varsayılan bitiş saati
+
+                            time_range = f"{start_time}-{end_time}"
+                        except (AttributeError, IndexError, TypeError, ValueError):
+                            # Herhangi bir hata durumunda varsayılan değerleri kullan
+                            date_str = today
+                            time_range = "00:00-00:00"
+
+                    # Jig ve işçi bilgileri
+                    jig_name = product.get_current_jig().get_name() if product.get_current_jig() else "Manuel"
+                    worker_names = "Manuel tamamlandı"
+
+                    assignments.append({
+                        "Product": product.get_serial_number(),
+                        "Jig": jig_name,
+                        "Operation": operation.get_name(),
+                        "Date": date_str,
+                        "Shift": shift_str,
+                        "Time Interval": time_range,
+                        "Workers": worker_names
+                    })
+
         return assignments
 
     def export_assignments_to_excel(self, file_path=None):
