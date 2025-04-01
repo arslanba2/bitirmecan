@@ -206,7 +206,7 @@ class MainController:
     def set_critical_operations(self, _sn):
         """
         Calculates the critical path for a product using remaining operation durations.
-        Only considers operations that are not yet completed.
+        Considers operations that are not yet completed or have remaining time.
 
         Args:
             _sn: Product serial number
@@ -215,9 +215,19 @@ class MainController:
         product = self.get_product(_sn)
         calculator = SetCriticalOperation.Graph()
 
-        # Sadece tamamlanmamış operasyonları CPM hesaplamasına dahil et
+        # Tamamlanmamış VEYA kalan süresi olan operasyonları CPM hesaplamasına dahil et
         for operation in product.get_operations():
-            if not operation.get_completed():
+            # Kalan süresi olup olmadığını kontrol et
+            has_remaining_time = operation.get_remaining_duration() is not None and operation.get_remaining_duration() > 0.001
+
+            # Tutarsızlık kontrolü - tamamlandı ama kalan süre varsa, durumu düzelt
+            if operation.get_completed() and has_remaining_time:
+                print(
+                    f"Fixing inconsistency in set_critical_operations: Operation {operation.get_name()} marked as completed but has remaining time {operation.get_remaining_duration()}")
+                operation.set_completed(False)  # Completed flag'i düzelt
+
+            # Tamamlanmamış VEYA kalan süresi olan operasyonları dahil et
+            if not operation.get_completed() or has_remaining_time:
                 task = operation.get_name()
 
                 # Operasyon süresini kontrol et, kalan süreyi kullan
@@ -249,7 +259,8 @@ class MainController:
         critical_op_obj_list = []
         for op_name in critical_operations:
             op_obj = product.get_operation_by_name(op_name)
-            if op_obj and not op_obj.get_completed():  # Tamamlanmamış olduğundan emin ol
+            if op_obj and (not op_obj.get_completed() or (
+                    op_obj.get_remaining_duration() is not None and op_obj.get_remaining_duration() > 0.001)):
                 op_obj.set_early_start(earliest_start[op_name])
                 op_obj.set_late_finish(latest_finish[op_name])
                 if op_obj.get_early_start() == 0:
@@ -1026,8 +1037,19 @@ class MainController:
 
     def check_jig_capacity(self, product, operation, time_interval):
         """
+<<<<<<< HEAD
+        Checks if there's enough jig capacity for the operation in the given time interval.
+        Also prevents assigning the same operation multiple times.
+        Also ensures a maximum of 4 workers per product in the same time interval.
+        """
+        jig = product.get_current_jig()
+        total_jig_workers = 0
+        total_product_workers = 0  # Ürüne atanan toplam işçi sayısını takip eden yeni sayaç
+        operation_already_assigned = False
+=======
         Bir zaman aralığında bir ürün için maksimum 4 işçi sınırlamasını kontrol eder.
         Bir ürüne bir zaman aralığında en fazla 4 işçi atanabilir.
+>>>>>>> 585d5f858c9a2ec24fcae9fba962b27853b07f82
 
         Args:
             product: Kontrol edilecek ürün
@@ -1044,6 +1066,26 @@ class MainController:
         for assignment in time_interval.get_assignments():
             assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
 
+<<<<<<< HEAD
+            # Bu operasyon zaten bu aralıkta atanmışsa, tekrar atama
+            if assigned_operation.get_name() == operation.get_name() and assigned_product.get_serial_number() == product.get_serial_number():
+                print(f"Operation {operation.get_name()} already assigned in check_jig_capacity")
+                return False
+
+            # Atama aynı jig'e aitse, jig işçi sayısını ekle
+            if assigned_jig == jig:
+                total_jig_workers += len(assigned_workers)
+
+            # YENI KURAL: Aynı ürüne ait tüm işçileri say (jig'den bağımsız)
+            if assigned_product.get_serial_number() == product.get_serial_number():
+                total_product_workers += len(assigned_workers)
+
+        # Jig kapasitesi kontrolü (mevcut)
+        if total_jig_workers + operation.get_required_worker() > jig.get_max_assigned_worker():
+            print(
+                f"Jig capacity exceeded: {total_jig_workers} + {operation.get_required_worker()} > {jig.get_max_assigned_worker()}")
+            return False  # Jig kapasitesi aşılıyor, atama yapılamaz
+=======
             # Bu operasyon zaten bu aralıkta bu ürüne atanmışsa, tekrar atama
             if assigned_operation.get_name() == operation.get_name() and assigned_product == product:
                 print(
@@ -1064,32 +1106,16 @@ class MainController:
             print(
                 f"Product {product.get_serial_number()} capacity exceeded in interval: {total_workers_assigned_to_product} + {operation.get_required_worker()} > {max_workers_per_product}")
             return False  # Kapasite aşılıyor, sonraki zaman aralığına geçilmeli
+>>>>>>> 585d5f858c9a2ec24fcae9fba962b27853b07f82
 
-    def compatible_worker_number_check(self, operation, time_interval):
-        required_skills = operation.get_required_skills()
-        available_workers = []
+        # YENI KURAL: Ürün başına maksimum 4 işçi kontrolü
+        max_workers_per_product = 4  # Ürün başına maksimum işçi sayısı
+        if total_product_workers + operation.get_required_worker() > max_workers_per_product:
+            print(
+                f"Product worker limit exceeded for {product.get_serial_number()}: {total_product_workers} + {operation.get_required_worker()} > {max_workers_per_product}")
+            return False  # Ürün başına işçi sınırı aşılıyor, atama yapılamaz
 
-        for w in time_interval.available_workers:
-            worker_skills = w.get_skills()
-
-            # worker_skills'i SKILLS sözlüğünde key olarak ara
-            if worker_skills in SKILLS:
-                # worker_skills'in karşılığındaki yetenek kümesini al
-                worker_skill_set = SKILLS[worker_skills]
-
-                # required_skills, worker_skill_set içinde var mı kontrol et
-                if required_skills in worker_skill_set:
-                    available_workers.append(w)
-            else:
-                # worker_skills SKILLS sözlüğünde yoksa, doğrudan eşleşme kontrolü yap
-                if required_skills == worker_skills:
-                    available_workers.append(w)
-
-        # Yeterli sayıda uyumlu çalışan var mı kontrol et
-        if len(available_workers) >= operation.get_required_worker():
-            return True  # Atama yapılabilir
-        else:
-            return False  # Atama yapılamaz
+        return True  # Tüm kontroller başarılı, atama yapılabilir
 
     def create_assignment(self, time_interval, jig, product, operation, workers):
         """
