@@ -350,6 +350,7 @@ class MainController:
         İşçi takibini temizler (yeni bir çizelgeleme başlamadan önce çağrılmalı)
         """
         self.__operation_workers = {}
+
     def assign_workers_to_time_intervals(self):
         if not self.__ScheduleObject or not self.__workers:
             raise ValueError("Schedule and workers must be set.")
@@ -358,6 +359,11 @@ class MainController:
             for time_interval in date_obj.time_intervals:
                 # TimeInterval'ın tarih, vardiya ve zaman aralığını al
                 interval_date = date_obj.get_date()  # Zaman aralığının tarihi
+
+                # Convert interval_date to date object if it's a datetime object
+                if isinstance(interval_date, datetime):
+                    interval_date = interval_date.date()
+
                 interval_shift = time_interval.shift  # Vardiya
                 interval_start_time = time_interval.interval[0]  # Zaman aralığının başlangıcı
                 interval_end_time = time_interval.interval[1]  # Zaman aralığının bitişi
@@ -375,6 +381,10 @@ class MainController:
 
                     for schedule_entry in worker.get_shift_schedule():
                         schedule_date, schedule_shift, available_hours = schedule_entry
+
+                        # Convert schedule_date to date object if it's a datetime object
+                        if isinstance(schedule_date, datetime):
+                            schedule_date = schedule_date.date()
 
                         # Tarih ve vardiya eşleşiyor mu kontrol et
                         if schedule_date == interval_date and schedule_shift == interval_shift:
@@ -1053,9 +1063,11 @@ class MainController:
         """
         Checks if there's enough jig capacity for the operation in the given time interval.
         Also prevents assigning the same operation multiple times.
+        Also ensures a maximum of 4 workers per product in the same time interval.
         """
         jig = product.get_current_jig()
-        total_workers_assigned = 0
+        total_jig_workers = 0
+        total_product_workers = 0  # Ürüne atanan toplam işçi sayısını takip eden yeni sayaç
         operation_already_assigned = False
 
         # Bu aralıktaki mevcut atamaları kontrol et
@@ -1063,47 +1075,32 @@ class MainController:
             assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
 
             # Bu operasyon zaten bu aralıkta atanmışsa, tekrar atama
-            if assigned_operation.get_name() == operation.get_name():
+            if assigned_operation.get_name() == operation.get_name() and assigned_product.get_serial_number() == product.get_serial_number():
                 print(f"Operation {operation.get_name()} already assigned in check_jig_capacity")
                 return False
 
-            # Atama aynı jig ve aynı ürüne aitse, işçi sayısını ekle
-            if assigned_jig == jig and assigned_product == product:
-                total_workers_assigned += len(assigned_workers)
+            # Atama aynı jig'e aitse, jig işçi sayısını ekle
+            if assigned_jig == jig:
+                total_jig_workers += len(assigned_workers)
 
-        # Yeni operasyon için gereken işçi sayısını ekleyerek toplamı kontrol et
-        if total_workers_assigned + operation.get_required_worker() <= jig.get_max_assigned_worker():
-            return True  # Jig kapasitesi aşılmıyor, atama yapılabilir
-        else:
+            # YENI KURAL: Aynı ürüne ait tüm işçileri say (jig'den bağımsız)
+            if assigned_product.get_serial_number() == product.get_serial_number():
+                total_product_workers += len(assigned_workers)
+
+        # Jig kapasitesi kontrolü (mevcut)
+        if total_jig_workers + operation.get_required_worker() > jig.get_max_assigned_worker():
             print(
-                f"Jig capacity exceeded: {total_workers_assigned} + {operation.get_required_worker()} > {jig.get_max_assigned_worker()}")
+                f"Jig capacity exceeded: {total_jig_workers} + {operation.get_required_worker()} > {jig.get_max_assigned_worker()}")
             return False  # Jig kapasitesi aşılıyor, atama yapılamaz
 
-    def compatible_worker_number_check(self, operation, time_interval):
-        required_skills = operation.get_required_skills()
-        available_workers = []
+        # YENI KURAL: Ürün başına maksimum 4 işçi kontrolü
+        max_workers_per_product = 4  # Ürün başına maksimum işçi sayısı
+        if total_product_workers + operation.get_required_worker() > max_workers_per_product:
+            print(
+                f"Product worker limit exceeded for {product.get_serial_number()}: {total_product_workers} + {operation.get_required_worker()} > {max_workers_per_product}")
+            return False  # Ürün başına işçi sınırı aşılıyor, atama yapılamaz
 
-        for w in time_interval.available_workers:
-            worker_skills = w.get_skills()
-
-            # worker_skills'i SKILLS sözlüğünde key olarak ara
-            if worker_skills in SKILLS:
-                # worker_skills'in karşılığındaki yetenek kümesini al
-                worker_skill_set = SKILLS[worker_skills]
-
-                # required_skills, worker_skill_set içinde var mı kontrol et
-                if required_skills in worker_skill_set:
-                    available_workers.append(w)
-            else:
-                # worker_skills SKILLS sözlüğünde yoksa, doğrudan eşleşme kontrolü yap
-                if required_skills == worker_skills:
-                    available_workers.append(w)
-
-        # Yeterli sayıda uyumlu çalışan var mı kontrol et
-        if len(available_workers) >= operation.get_required_worker():
-            return True  # Atama yapılabilir
-        else:
-            return False  # Atama yapılamaz
+        return True  # Tüm kontroller başarılı, atama yapılabilir
 
     def create_assignment(self, time_interval, jig, product, operation, workers):
         """
@@ -1830,9 +1827,7 @@ class MainController:
     def export_gantt_chart_to_excel(self, file_path=None):
         """
         Sadece Gantt şemasını ayrı bir Excel dosyasına aktarır.
-
-        :param file_path: Excel dosyasının kaydedileceği konum. None ise kullanıcıdan sorulur.
-        :return: Başarılı olursa True, aksi halde False
+        İzinli işçileri de gösterir.
         """
         try:
             # Atama çıktılarını al
@@ -1961,6 +1956,9 @@ class MainController:
                 "AEAAAA",  # Gümüş
             ]
 
+            # İzin rengi
+            leave_color = "FF0000"  # Kırmızı
+
             # Her işçi için toplam çalışma saatlerini hesapla
             worker_total_hours = {}
             for worker_name, data in worker_assignments.items():
@@ -1994,13 +1992,21 @@ class MainController:
                 worker_row = row_offset
                 row_offset += 1
 
+                # Bu işçinin sicil numarasını bul
+                reg_number = data["registration_number"]
+                worker_obj = None
+                for w in self.__workers:
+                    if w.get_registration_number() == reg_number:
+                        worker_obj = w
+                        break
+
                 # İşçi adı
                 gantt_sheet.cell(row=worker_row, column=1).value = worker_name
                 gantt_sheet.cell(row=worker_row, column=1).alignment = Alignment(horizontal='left')
                 gantt_sheet.cell(row=worker_row, column=1).border = thin_border
 
                 # Sicil numarası
-                gantt_sheet.cell(row=worker_row, column=2).value = data["registration_number"]
+                gantt_sheet.cell(row=worker_row, column=2).value = reg_number
                 gantt_sheet.cell(row=worker_row, column=2).alignment = Alignment(horizontal='center')
                 gantt_sheet.cell(row=worker_row, column=2).border = thin_border
 
@@ -2017,31 +2023,74 @@ class MainController:
 
                 worker_color = worker_colors[worker_name]
 
-                # İşçinin atamalarını işle
-                for assignment in data["assignments"]:
-                    date_str = assignment["date"]
-                    time_interval = assignment["time"]
-                    operation = assignment["operation"]
-                    product = assignment["product"]
+                # İşçinin off_days bilgisini al
+                off_days = None
+                if worker_obj and worker_obj.get_off_days():
+                    off_days = worker_obj.get_off_days()
+                    off_start_date = datetime.strptime(off_days[0], "%d.%m.%Y").date()
+                    off_end_date = datetime.strptime(off_days[1], "%d.%m.%Y").date()
 
-                    # Tarihin indeksini bul
-                    date_idx = sorted_dates.index(date_str)
-                    # Zaman aralığının indeksini bul
-                    time_idx = sorted_time_intervals.index(time_interval)
+                # Her tarih ve zaman aralığı için grid'i doldur
+                for date_idx, date_str in enumerate(sorted_dates):
+                    date_col = col_offset + date_idx * (len(sorted_time_intervals) + 1)
+                    date_obj = datetime.strptime(date_str, "%d.%m.%Y").date()
 
-                    # Gantt hücresinin konumunu hesapla
-                    cell_col = col_offset + date_idx * (len(sorted_time_intervals) + 1) + time_idx
+                    # Bu tarih çalışanın izin tarih aralığında mı kontrol et
+                    is_on_leave = False
+                    if off_days and off_start_date <= date_obj <= off_end_date:
+                        is_on_leave = True
 
-                    # Hücreyi doldur
-                    cell = gantt_sheet.cell(row=worker_row, column=cell_col)
-                    cell.value = f"{product}-{operation}"
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                    cell.fill = PatternFill(start_color=worker_color, end_color=worker_color, fill_type="solid")
-                    cell.border = thin_border
+                    for time_idx, time_interval in enumerate(sorted_time_intervals):
+                        cell_col = date_col + time_idx
+                        cell = gantt_sheet.cell(row=worker_row, column=cell_col)
+                        cell.border = thin_border
+
+                        # Eğer işçi izinliyse
+                        if is_on_leave:
+                            cell.value = "İzinli"
+                            cell.fill = PatternFill(start_color=leave_color, end_color=leave_color, fill_type="solid")
+                            cell.font = Font(color="FFFFFF")  # Beyaz yazı
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
+                        else:
+                            # İzinli değilse normal atama kontrolü yap
+                            has_assignment = False
+                            for assignment in data["assignments"]:
+                                if assignment["date"] == date_str and assignment["time"] == time_interval:
+                                    cell.value = f"{assignment['product']}-{assignment['operation']}"
+                                    cell.fill = PatternFill(start_color=worker_color, end_color=worker_color, fill_type="solid")
+                                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                                    has_assignment = True
+                                    break
+
+                            # Boş hücrelere kenarlık ekle
+                            if not has_assignment:
+                                cell.border = thin_border
+
+                # İşçinin atamalarını işle (artık burayı kullanmıyoruz, üstteki kod ile değiştirdik)
+                # for assignment in data["assignments"]:
+                #     date_str = assignment["date"]
+                #     time_interval = assignment["time"]
+                #     operation = assignment["operation"]
+                #     product = assignment["product"]
+                #
+                #     # Tarihin indeksini bul
+                #     date_idx = sorted_dates.index(date_str)
+                #     # Zaman aralığının indeksini bul
+                #     time_idx = sorted_time_intervals.index(time_interval)
+                #
+                #     # Gantt hücresinin konumunu hesapla
+                #     cell_col = col_offset + date_idx * (len(sorted_time_intervals) + 1) + time_idx
+                #
+                #     # Hücreyi doldur
+                #     cell = gantt_sheet.cell(row=worker_row, column=cell_col)
+                #     cell.value = f"{product}-{operation}"
+                #     cell.alignment = Alignment(horizontal='center', vertical='center')
+                #     cell.fill = PatternFill(start_color=worker_color, end_color=worker_color, fill_type="solid")
+                #     cell.border = thin_border
 
             # Açıklayıcı not ekle
             note_row = row_offset + 2
-            gantt_sheet.cell(row=note_row, column=1).value = "Note: Each cell contains 'Product-Operation'"
+            gantt_sheet.cell(row=note_row, column=1).value = "Note: Each cell contains 'Product-Operation', red cells indicate leave days"
             gantt_sheet.cell(row=note_row, column=1).font = Font(italic=True)
             gantt_sheet.merge_cells(
                 start_row=note_row,
@@ -2049,13 +2098,6 @@ class MainController:
                 end_row=note_row,
                 end_column=5
             )
-
-            # Boş hücrelere ince kenarlık ekle
-            for row in range(4, row_offset):
-                for col in range(4, col_offset + len(sorted_dates) * (len(sorted_time_intervals) + 1)):
-                    cell = gantt_sheet.cell(row=row, column=col)
-                    if not cell.value:  # Boş hücreler için
-                        cell.border = thin_border
 
             # Dosyayı kaydet
             wb.save(file_path)
