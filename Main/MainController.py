@@ -1037,7 +1037,6 @@ class MainController:
 
     def check_jig_capacity(self, product, operation, time_interval):
         """
-<<<<<<< HEAD
         Checks if there's enough jig capacity for the operation in the given time interval.
         Also prevents assigning the same operation multiple times.
         Also ensures a maximum of 4 workers per product in the same time interval.
@@ -1046,27 +1045,15 @@ class MainController:
         total_jig_workers = 0
         total_product_workers = 0  # Ürüne atanan toplam işçi sayısını takip eden yeni sayaç
         operation_already_assigned = False
-=======
-        Bir zaman aralığında bir ürün için maksimum 4 işçi sınırlamasını kontrol eder.
-        Bir ürüne bir zaman aralığında en fazla 4 işçi atanabilir.
->>>>>>> 585d5f858c9a2ec24fcae9fba962b27853b07f82
 
-        Args:
-            product: Kontrol edilecek ürün
-            operation: Atanacak operasyon
-            time_interval: Kontrol edilecek zaman aralığı
 
-        Returns:
-            True: Ürüne işçi atanabilir
-            False: Ürün kapasitesi dolmuş, sonraki zaman aralığına geçilmeli
-        """
         total_workers_assigned_to_product = 0
 
         # Bu ürüne bu zaman aralığında zaten atanmış işçileri say
         for assignment in time_interval.get_assignments():
             assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
 
-<<<<<<< HEAD
+
             # Bu operasyon zaten bu aralıkta atanmışsa, tekrar atama
             if assigned_operation.get_name() == operation.get_name() and assigned_product.get_serial_number() == product.get_serial_number():
                 print(f"Operation {operation.get_name()} already assigned in check_jig_capacity")
@@ -1085,7 +1072,7 @@ class MainController:
             print(
                 f"Jig capacity exceeded: {total_jig_workers} + {operation.get_required_worker()} > {jig.get_max_assigned_worker()}")
             return False  # Jig kapasitesi aşılıyor, atama yapılamaz
-=======
+
             # Bu operasyon zaten bu aralıkta bu ürüne atanmışsa, tekrar atama
             if assigned_operation.get_name() == operation.get_name() and assigned_product == product:
                 print(
@@ -1106,7 +1093,7 @@ class MainController:
             print(
                 f"Product {product.get_serial_number()} capacity exceeded in interval: {total_workers_assigned_to_product} + {operation.get_required_worker()} > {max_workers_per_product}")
             return False  # Kapasite aşılıyor, sonraki zaman aralığına geçilmeli
->>>>>>> 585d5f858c9a2ec24fcae9fba962b27853b07f82
+
 
         # YENI KURAL: Ürün başına maksimum 4 işçi kontrolü
         max_workers_per_product = 4  # Ürün başına maksimum işçi sayısı
