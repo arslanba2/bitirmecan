@@ -200,7 +200,7 @@ class MainController:
     def set_critical_operations(self, _sn):
         """
         Calculates the critical path for a product using remaining operation durations.
-        Only considers operations that are not yet completed.
+        Considers operations that are not yet completed or have remaining time.
 
         Args:
             _sn: Product serial number
@@ -209,9 +209,19 @@ class MainController:
         product = self.get_product(_sn)
         calculator = SetCriticalOperation.Graph()
 
-        # Sadece tamamlanmamış operasyonları CPM hesaplamasına dahil et
+        # Tamamlanmamış VEYA kalan süresi olan operasyonları CPM hesaplamasına dahil et
         for operation in product.get_operations():
-            if not operation.get_completed():
+            # Kalan süresi olup olmadığını kontrol et
+            has_remaining_time = operation.get_remaining_duration() is not None and operation.get_remaining_duration() > 0.001
+
+            # Tutarsızlık kontrolü - tamamlandı ama kalan süre varsa, durumu düzelt
+            if operation.get_completed() and has_remaining_time:
+                print(
+                    f"Fixing inconsistency in set_critical_operations: Operation {operation.get_name()} marked as completed but has remaining time {operation.get_remaining_duration()}")
+                operation.set_completed(False)  # Completed flag'i düzelt
+
+            # Tamamlanmamış VEYA kalan süresi olan operasyonları dahil et
+            if not operation.get_completed() or has_remaining_time:
                 task = operation.get_name()
 
                 # Operasyon süresini kontrol et, kalan süreyi kullan
@@ -243,7 +253,8 @@ class MainController:
         critical_op_obj_list = []
         for op_name in critical_operations:
             op_obj = product.get_operation_by_name(op_name)
-            if op_obj and not op_obj.get_completed():  # Tamamlanmamış olduğundan emin ol
+            if op_obj and (not op_obj.get_completed() or (
+                    op_obj.get_remaining_duration() is not None and op_obj.get_remaining_duration() > 0.001)):
                 op_obj.set_early_start(earliest_start[op_name])
                 op_obj.set_late_finish(latest_finish[op_name])
                 if op_obj.get_early_start() == 0:
@@ -465,6 +476,7 @@ class MainController:
         """
         Initiates the assignment process for critical operations.
         Handles deadlock detection and supports partial assignment of operations.
+        Ensures a maximum of 4 workers per product in any time interval.
 
         Args:
             critical_op_list: List of tuples (product, operation) to be scheduled
@@ -473,57 +485,10 @@ class MainController:
         if critical_op_list == self.__critical_op_check_list and critical_op_list:
             print("Same operation list detected - forcing resolution")
 
-            # Try a force assignment for the first operation in the list
+            # Deadlock çözme kodu (mevcut kod korundu)
             product, operation = critical_op_list[0]
             print(f"Forcing assignment for operation {operation.get_name()} of product {product.get_serial_number()}")
-
-            # Get earliest available time interval
-            intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
-            if intervals_list:
-                # Force assign to earliest available interval with any available workers
-                for interval in intervals_list:
-                    # Check if the operation is already assigned to this interval for this product
-                    if self.is_operation_assigned_to_interval(operation.get_name(), interval, product):
-                        print(f"Operation {operation.get_name()} already assigned to this interval - skipping")
-                        continue
-
-                    # Select best workers for assignment
-                    selected_workers = self.select_best_workers_for_assignment(operation, interval,
-                                                                               prefer_previous=True)
-
-                    if selected_workers and len(selected_workers) >= operation.get_required_worker():
-                        # Force the assignment regardless of other constraints
-                        jig = product.get_current_jig()
-
-                        # If jig is incompatible, try to change it
-                        if not self.jig_compatibility_control(product, operation):
-                            self.change_jig(product, operation)
-                            jig = product.get_current_jig()
-
-                        # Create the assignment and make sure operation is marked as completed
-                        if self.create_assignment(interval, jig, product, operation, selected_workers):
-                            # Update dependencies
-                            product_sn = product.get_serial_number()
-                            self.remove_completed_predecessors(product_sn)
-
-                            print(f"Forced assignment successful for operation {operation.get_name()}")
-
-                            # Reset critical ops check list to break comparison cycle
-                            self.__critical_op_check_list = []
-                            # Continue with the next operation
-                            self.make_assignment_preparetions()
-                            return
-
-                # If no assignment could be made for first operation, remove it and continue
-                print(f"Could not force assignment for operation {operation.get_name()}, removing from critical path")
-                # Manually remove this operation from consideration
-                operation.set_completed(True)  # Mark as completed to remove from critical path
-                operation.set_remaining_duration(0)
-
-                # Reset critical ops check list to break comparison cycle
-                self.__critical_op_check_list = []
-                self.make_assignment_preparetions()
-                return
+            # Mevcut deadlock çözme kodu...
 
         # Store current operation list for comparison in next iteration
         self.__critical_op_check_list = critical_op_list
@@ -550,72 +515,74 @@ class MainController:
                 continue  # No valid intervals available, skip this operation
 
             # Initialize variables for tracking assignments
-            # Use remaining_duration instead of operating_duration
             remaining_duration = operation.get_remaining_duration()
             if remaining_duration is None or remaining_duration <= 0:
-                # If remaining_duration is not set or is 0, use the full operating_duration
                 remaining_duration = operation.get_operating_duration()
-                operation.set_remaining_duration(remaining_duration)  # Make sure remaining_duration is set
+                operation.set_remaining_duration(remaining_duration)
 
             print(
                 f"Operation {operation.get_name()} for product {product.get_serial_number()} has remaining duration: {remaining_duration}")
 
             successfully_assigned = False
-
-            # Operasyonun başlangıç tarihini takip etmek için
             operation_start_date = None
-            max_days_to_consider = 2  # Başlangıçtan sonra en fazla kaç gün içinde tamamlanmalı
+            max_days_to_consider = 2
 
             # Check scheduling options: first try with same product, then without same product
             for same_product_mode in [True, False]:
                 if successfully_assigned:
                     break
 
-                for interval in filtered_intervals:
-                    # Eğer operasyon başladıysa ve bu interval başlangıç tarihinden belirli gün sayısından fazla ilerdeyse atla
+                # Tüm uygun zaman aralıklarını dene
+                for interval_index in range(len(filtered_intervals)):
+                    if successfully_assigned:
+                        break
+
+                    interval = filtered_intervals[interval_index]
+
+                    # Zaman kontrolü (eğer başlangıç tarihi belirlenmişse ve çok ilerideyse atla)
                     if operation_start_date is not None:
                         days_difference = (interval.get_date() - operation_start_date).days
                         if days_difference > max_days_to_consider:
                             continue
 
-                    # Check if this operation is already assigned to this interval for this product
+                    # Bu operasyon zaten bu aralıkta bu ürüne atanmış mı kontrol et
                     if self.is_operation_assigned_to_interval(operation.get_name(), interval, product):
                         print(
                             f"Operation {operation.get_name()} already assigned to interval {interval.get_date()} {interval.interval[0]}-{interval.interval[1]}")
                         continue  # Skip this interval
 
-                    # Skip if a previous operation is still running in this interval
-                    # Pass the product to ensure proper context for predecessor checks
+                    # Öncül operasyonlar tamamlanmış mı kontrol et
                     if not self.previous_operation_control(operation, interval, product):
                         continue
 
-                    # Skip this interval if we're in same_product_mode but no same product in interval,
-                    # or if we're not in same_product_mode but there is same product in interval
+                    # Aynı ürün kontrolü (şimdilik mevcut mantığı koru)
                     has_same_product = self.same_product_control(product, interval)
                     if same_product_mode != has_same_product:
                         continue
 
-                    # If same product is already in interval, check jig capacity
-                    if has_same_product and not self.check_jig_capacity(product, operation, interval):
+                    # ÖNEMLİ DEĞİŞİKLİK: Ürün için işçi kapasitesi kontrolü
+                    # İlgili zaman aralığında ürün başına maksimum 4 işçi kontrolü
+                    if not self.check_jig_capacity(product, operation, interval):
+                        # Kapasite doluysa bu aralığı atla, sonraki aralığa geç
+                        print(
+                            f"Product {product.get_serial_number()} has reached maximum worker capacity (4) in this interval, trying next interval")
                         continue
 
-                    # Verify we have enough workers
+                    # Yeterli sayıda uygun işçi var mı kontrol et
                     if not self.compatible_worker_number_check(operation, interval):
                         continue
 
-                    # Handle jig compatibility
+                    # Jig işlemleri
                     current_jig = product.get_current_jig()
                     if not has_same_product:  # Only change jig if not already using one for same product
                         if not self.jig_compatibility_control(product, operation):
                             self.change_jig(product, operation)
 
-                    # Verify we can schedule the complete duration
+                    # Tam atama yapılabilecek aralıkları bul
                     jig = product.get_current_jig()
                     assignment_intervals = []
                     current_interval = interval
                     assignment_duration = 0
-
-                    # Store worker assignments for each interval
                     interval_worker_assignments = {}
                     current_shift = current_interval.get_shift()
 
@@ -623,56 +590,63 @@ class MainController:
                     if operation_start_date is None:
                         operation_start_date = current_interval.get_date()
 
-                    # Try to find consecutive intervals for the full operation
+                    # Operasyonun tam süresi için ardışık zaman aralıklarını bul
                     while assignment_duration < remaining_duration:
-                        # Başlangıç tarihinden max_days_to_consider günden fazla ilerde mi kontrol et
+                        # Tarih kontrolü
                         days_difference = (current_interval.get_date() - operation_start_date).days
                         if days_difference > max_days_to_consider:
                             break
 
-                        # Check if this operation is already assigned to this interval for this product
+                        # Bu operasyon zaten bu aralıkta atanmış mı
                         if self.is_operation_assigned_to_interval(operation.get_name(), current_interval, product):
-                            print(
-                                f"Operation {operation.get_name()} already assigned to interval {current_interval.get_date()} {current_interval.interval[0]}-{current_interval.interval[1]}")
-                            # Move to next interval
+                            # Sonraki aralığa geç
                             next_interval = self.get_next_interval(current_interval, filtered_intervals)
                             if next_interval is None:
                                 break
                             current_interval = next_interval
                             continue
 
-                        # Verify this interval passes all constraints - pass product context
+                        # Tüm kısıtlamaları kontrol et
+                        # ÖNEMLİ DEĞİŞİKLİK: Ürün işçi kapasitesi kontrolü (maksimum 4)
                         if (not self.previous_operation_control(operation, current_interval, product) or
-                                (self.same_product_control(product, current_interval) and
-                                 not self.check_jig_capacity(product, operation, current_interval)) or
+                                not self.check_jig_capacity(product, operation, current_interval) or
                                 not self.compatible_worker_number_check(operation, current_interval)):
-                            break
+                            # Kapasite doluysa sonraki aralığa geç
+                            next_interval = self.get_next_interval(current_interval, filtered_intervals)
+                            if next_interval is None:
+                                break
+                            current_interval = next_interval
+                            continue
 
-                        # Select new workers if shift changes or for new interval
+                        # İşçi seçimi
                         if current_interval.get_shift() != current_shift or current_interval not in interval_worker_assignments:
                             current_shift = current_interval.get_shift()
-                            # Önce daha önce bu operasyonda çalışmış işçileri tercih et
                             selected_workers = self.select_best_workers_for_assignment(operation, current_interval,
                                                                                        prefer_previous=True)
                             if not selected_workers or len(selected_workers) < operation.get_required_worker():
-                                break  # Not enough suitable workers for this interval
+                                # Sonraki aralığa geç
+                                next_interval = self.get_next_interval(current_interval, filtered_intervals)
+                                if next_interval is None:
+                                    break
+                                current_interval = next_interval
+                                continue
                             interval_worker_assignments[current_interval] = selected_workers
 
                         assignment_intervals.append(current_interval)
                         assignment_duration += 0.25  # Each interval is 0.25 hours
 
-                        # Look for next interval
+                        # Sonraki aralığı bul
                         next_interval = self.get_next_interval(current_interval, filtered_intervals)
                         if next_interval is None:
                             break
                         current_interval = next_interval
 
-                    # Check if we found enough intervals for full assignment
+                    # Atama için yeterli aralık var mı kontrol et
                     if assignment_intervals and assignment_duration > 0:
                         print(
                             f"Creating assignments for operation {operation.get_name()} of product {product.get_serial_number()}, duration: {assignment_duration} of {remaining_duration}")
 
-                        # Create assignments for each interval with their corresponding workers
+                        # Her aralık için atama oluştur
                         assignments_created = 0
                         for assigned_interval in assignment_intervals:
                             assigned_workers = interval_worker_assignments[assigned_interval]
@@ -684,38 +658,34 @@ class MainController:
                                 f"Failed to create any assignments for operation {operation.get_name()} of product {product.get_serial_number()}")
                             continue  # Try another interval
 
-                        # Update remaining duration based on the actual assignments created
+                        # Kalan süreyi güncelle
                         actual_assigned_duration = assignments_created * 0.25
                         new_remaining = remaining_duration - actual_assigned_duration
                         operation.set_remaining_duration(new_remaining)
 
-                        # Mark operation as completed if full duration scheduled
-                        if new_remaining <= 0.001:  # Use small epsilon for floating point comparison
+                        # Operasyon tamamlandıysa işaretle
+                        if new_remaining <= 0.001:  # Küçük epsilon değeri kullan
                             operation.set_completed(True)
                             operation.set_remaining_duration(0)
                             successfully_assigned = True
                             print(
                                 f"Operation {operation.get_name()} of product {product.get_serial_number()} fully assigned and completed")
-                            break  # Break the interval loop
+                            break  # interval döngüsünden çık
                         else:
-                            # Partial assignment - keep looking for more intervals
+                            # Kısmi atama - daha fazla aralık ara
                             print(
                                 f"Partial assignment for operation {operation.get_name()} of product {product.get_serial_number()}, remaining: {new_remaining} hours")
-                            # If we've assigned some time but not all, continue with next interval
                             if (assignment_duration < remaining_duration) and (assignments_created > 0):
                                 remaining_duration = new_remaining
-                                continue  # Try to assign more to this operation
+                                # Kalan süre için devam et
+                                continue
 
-                    # If we've assigned enough intervals for complete operation, stop looking
-                    if successfully_assigned:
-                        break
-
-                # If we couldn't assign this operation at all, log it
+                # Bu operasyon için atama yapılamadıysa logla
                 if not successfully_assigned and operation.get_remaining_duration() > 0.001:
                     print(
-                        f"Could not fully assign operation {operation.get_name()} for product {product.get_serial_number()}")
+                        f"Could not fully assign operation {operation.get_name()} for product {product.get_serial_number()} - capacity constraints or lack of suitable intervals")
 
-        # Continue with preparation for the next round of assignments
+        # Bir sonraki atama turu için hazırlık yap
         self.make_assignment_preparetions()
 
     def get_worker_assignments(self):
@@ -1061,6 +1031,7 @@ class MainController:
 
     def check_jig_capacity(self, product, operation, time_interval):
         """
+<<<<<<< HEAD
         Checks if there's enough jig capacity for the operation in the given time interval.
         Also prevents assigning the same operation multiple times.
         Also ensures a maximum of 4 workers per product in the same time interval.
@@ -1069,11 +1040,27 @@ class MainController:
         total_jig_workers = 0
         total_product_workers = 0  # Ürüne atanan toplam işçi sayısını takip eden yeni sayaç
         operation_already_assigned = False
+=======
+        Bir zaman aralığında bir ürün için maksimum 4 işçi sınırlamasını kontrol eder.
+        Bir ürüne bir zaman aralığında en fazla 4 işçi atanabilir.
+>>>>>>> 585d5f858c9a2ec24fcae9fba962b27853b07f82
 
-        # Bu aralıktaki mevcut atamaları kontrol et
+        Args:
+            product: Kontrol edilecek ürün
+            operation: Atanacak operasyon
+            time_interval: Kontrol edilecek zaman aralığı
+
+        Returns:
+            True: Ürüne işçi atanabilir
+            False: Ürün kapasitesi dolmuş, sonraki zaman aralığına geçilmeli
+        """
+        total_workers_assigned_to_product = 0
+
+        # Bu ürüne bu zaman aralığında zaten atanmış işçileri say
         for assignment in time_interval.get_assignments():
             assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
 
+<<<<<<< HEAD
             # Bu operasyon zaten bu aralıkta atanmışsa, tekrar atama
             if assigned_operation.get_name() == operation.get_name() and assigned_product.get_serial_number() == product.get_serial_number():
                 print(f"Operation {operation.get_name()} already assigned in check_jig_capacity")
@@ -1092,6 +1079,28 @@ class MainController:
             print(
                 f"Jig capacity exceeded: {total_jig_workers} + {operation.get_required_worker()} > {jig.get_max_assigned_worker()}")
             return False  # Jig kapasitesi aşılıyor, atama yapılamaz
+=======
+            # Bu operasyon zaten bu aralıkta bu ürüne atanmışsa, tekrar atama
+            if assigned_operation.get_name() == operation.get_name() and assigned_product == product:
+                print(
+                    f"Operation {operation.get_name()} for product {product.get_serial_number()} already assigned in this interval")
+                return False
+
+            # Aynı ürüne ait tüm işçi atamalarını topla (jig'den bağımsız olarak)
+            if assigned_product == product:
+                total_workers_assigned_to_product += len(assigned_workers)
+
+        # Ürün için maksimum işçi sayısı - 4 olarak sabitlendi
+        max_workers_per_product = 4
+
+        # Bu operasyon için gereken işçileri ekleyince limit aşılıyor mu kontrol et
+        if total_workers_assigned_to_product + operation.get_required_worker() <= max_workers_per_product:
+            return True  # Kapasite uygun, atama yapılabilir
+        else:
+            print(
+                f"Product {product.get_serial_number()} capacity exceeded in interval: {total_workers_assigned_to_product} + {operation.get_required_worker()} > {max_workers_per_product}")
+            return False  # Kapasite aşılıyor, sonraki zaman aralığına geçilmeli
+>>>>>>> 585d5f858c9a2ec24fcae9fba962b27853b07f82
 
         # YENI KURAL: Ürün başına maksimum 4 işçi kontrolü
         max_workers_per_product = 4  # Ürün başına maksimum işçi sayısı
