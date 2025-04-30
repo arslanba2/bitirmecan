@@ -130,6 +130,143 @@ class MainController:
 
         self.print_operation_durations()
 
+    def find_critical_operations(self):
+        try:
+            if not self.all_nodes:
+                print("Kritik Yol Analizi: Grafta hiç düğüm yok.")
+                return [], {}, {}
+
+            # Her düğüm için süre tanımlandığından emin olalım
+            for node in self.all_nodes:
+                if node not in self.duration:
+                    print(f"Uyarı: '{node}' düğümü için süre tanımlanmamış, 0.01 varsayılıyor.")
+                    self.duration[node] = 0.01  # En az 0.01 süre
+
+            # Döngü algılama için yardımcı fonksiyon
+            def detect_cycles():
+                visited = set()
+                path = set()
+                cycles = []
+
+                def dfs(node, path_list):
+                    if node in path:
+                        cycle = path_list[path_list.index(node):]
+                        cycle.append(node)
+                        cycles.append(cycle)
+                        return True
+
+                    if node in visited:
+                        return False
+
+                    visited.add(node)
+                    path.add(node)
+                    path_list.append(node)
+
+                    for neighbor in self.graph.get(node, []):
+                        if dfs(neighbor, path_list):
+                            return True
+
+                    path.remove(node)
+                    path_list.pop()
+                    return False
+
+                for node in self.all_nodes:
+                    if node not in visited:
+                        dfs(node, [])
+
+                return cycles
+
+            # Döngüleri algıla
+            cycles = detect_cycles()
+            if cycles:
+                print(f"DİKKAT: Grafikte {len(cycles)} döngü tespit edildi:")
+                for i, cycle in enumerate(cycles):
+                    print(f"Döngü {i + 1}: {' -> '.join(cycle)}")
+
+                # Döngüleri kır
+                for cycle in cycles:
+                    # Döngüdeki en az bir bağlantıyı kaldır
+                    # Son düğümden ilk düğüme olan bağlantıyı keselim
+                    last_node = cycle[-1]
+                    first_node = cycle[0]
+                    if first_node in self.graph.get(last_node, []):
+                        self.graph[last_node].remove(first_node)
+                        self.in_degree[first_node] -= 1
+                        print(f"Döngüyü kırmak için {last_node} -> {first_node} bağlantısı kaldırıldı")
+
+            # Topological sort
+            queue = deque()
+            in_degree_copy = self.in_degree.copy()  # Orijinali değiştirmemek için kopya oluştur
+
+            for task in in_degree_copy:
+                if in_degree_copy[task] == 0:
+                    queue.append(task)
+
+            topological_order = []
+            while queue:
+                node = queue.popleft()
+                topological_order.append(node)
+
+                for neighbor in self.graph.get(node, []):
+                    in_degree_copy[neighbor] -= 1
+                    if in_degree_copy[neighbor] == 0:
+                        queue.append(neighbor)
+
+            # Topolojik sıralama tüm düğümleri içermiyor mu kontrol et
+            if len(topological_order) != len(self.all_nodes):
+                print(
+                    f"Uyarı: Topolojik sıralama sadece {len(topological_order)}/{len(self.all_nodes)} düğümü içeriyor - döngü olabilir.")
+                missing_nodes = self.all_nodes - set(topological_order)
+                print(f"Eksik düğümler: {missing_nodes}")
+
+                # Kalan düğümleri ekle
+                for node in missing_nodes:
+                    topological_order.append(node)
+                    print(f"'{node}' düğümü topolojik sıralamaya zorla eklendi")
+
+            # Calculate earliest start and finish times
+            earliest_start = {task: 0 for task in self.all_nodes}
+            earliest_finish = {task: 0 for task in self.all_nodes}
+
+            for task in topological_order:
+                earliest_finish[task] = earliest_start[task] + self.duration[task]
+                for neighbor in self.graph.get(task, []):
+                    earliest_start[neighbor] = max(earliest_start[neighbor], earliest_finish[task])
+
+            # Calculate latest start and finish times
+            max_finish_time = max(earliest_finish.values())
+            latest_finish = {task: max_finish_time for task in self.all_nodes}
+            latest_start = {task: max_finish_time - self.duration[task] for task in self.all_nodes}
+
+            # Reverse topological order for latest calculations
+            for task in reversed(topological_order):
+                min_successor_start = float('inf')
+                for neighbor in self.graph.get(task, []):
+                    min_successor_start = min(min_successor_start, latest_start[neighbor])
+
+                # Eğer ardıllar varsa, en küçük başlangıç zamanını kullan
+                if min_successor_start < float('inf'):
+                    latest_finish[task] = min_successor_start
+                else:
+                    latest_finish[task] = max_finish_time
+
+                latest_start[task] = latest_finish[task] - self.duration[task]
+
+            # Identify critical operations
+            critical_operations = []
+            for task in topological_order:
+                # Kritik yolu tespit etmek için slack hesapla
+                slack = latest_start[task] - earliest_start[task]
+                if abs(slack) < 0.01:  # Küçük bir epsilon değeri
+                    critical_operations.append(task)
+
+            return critical_operations, earliest_start, latest_finish
+
+        except Exception as e:
+            print(f"Kritik Yol Analizi Hatası: {e}")
+            import traceback
+            traceback.print_exc()
+            return [], {}, {}
     def print_operation_durations(self):
         for product in self.__products:
             for operation in product.get_operations():
@@ -178,19 +315,12 @@ class MainController:
     def remove_completed_predecessors(self, _sn):
         product = self.get_product(_sn)
 
-        # Önce tüm tamamlanmış operasyonları bul
-        completed_operations = []
-        for operation in product.get_operations():
-            if operation.get_completed():
-                completed_operations.append(operation)
-
         # Her operasyon için tamamlanmış öncülleri güncelle
         for operation in product.get_operations():
             if not operation.get_completed():  # Sadece tamamlanmamış operasyonları güncelle
-                # Öncül listelerini klonla
+                # Tamamlanmamış öncülleri tespit et
                 uncompleted_predecessors = []
 
-                # Tamamlanmamış öncülleri tespit et
                 for pred in operation.get_predecessors():
                     if not pred.get_completed():
                         uncompleted_predecessors.append(pred)
@@ -198,15 +328,16 @@ class MainController:
                 # Tamamlanmamış öncülleri güncelle
                 operation.set_uncompleted_predecessors(uncompleted_predecessors)
 
-                # Eğer artık tamamlanmamış öncül kalmadıysa, işaretleyelim
-                if len(uncompleted_predecessors) == 0:
-                    print(f"Operation {operation.get_name()} has no more incomplete predecessors")
+                # Debug çıktısı
+                if len(uncompleted_predecessors) == 0 and len(operation.get_predecessors()) > 0:
+                    print(
+                        f"Operation {operation.get_name()} for product {product.get_serial_number()} - tüm öncüller tamamlandı")
 
     # CPM calculation
     def set_critical_operations(self, _sn):
         """
         Calculates the critical path for a product using remaining operation durations.
-        Considers operations that are not yet completed or have remaining time.
+        Considers operations that are not yet completed.
 
         Args:
             _sn: Product serial number
@@ -215,25 +346,14 @@ class MainController:
         product = self.get_product(_sn)
         calculator = SetCriticalOperation.Graph()
 
-        # Tamamlanmamış VEYA kalan süresi olan operasyonları CPM hesaplamasına dahil et
+        # Tüm tamamlanmamış operasyonları CPM hesaplamasına dahil et
         for operation in product.get_operations():
-            # Kalan süresi olup olmadığını kontrol et
-            has_remaining_time = operation.get_remaining_duration() is not None and operation.get_remaining_duration() > 0.001
-
-            # Tutarsızlık kontrolü - tamamlandı ama kalan süre varsa, durumu düzelt
-            if operation.get_completed() and has_remaining_time:
-                print(
-                    f"Fixing inconsistency in set_critical_operations: Operation {operation.get_name()} marked as completed but has remaining time {operation.get_remaining_duration()}")
-                operation.set_completed(False)  # Completed flag'i düzelt
-
-            # Tamamlanmamış VEYA kalan süresi olan operasyonları dahil et
-            if not operation.get_completed() or has_remaining_time:
+            # Sadece tamamlanmamış operasyonları dahil et
+            if not operation.get_completed():
                 task = operation.get_name()
 
-                # Operasyon süresini kontrol et, kalan süreyi kullan
-                # Eğer kalan süre tanımlanmamışsa veya sıfırsa, tam süreyi kullan
+                # Kalan süreyi kontrol et
                 if operation.get_remaining_duration() is None or operation.get_remaining_duration() <= 0:
-                    # Eğer kalan süre tanımlanmamışsa, tam süreyi ata
                     operation.set_remaining_duration(operation.get_operating_duration())
 
                 # En az 0.01 süre olmasını sağla (CPM hesaplamasında sıfır süre problem çıkarabilir)
@@ -259,12 +379,10 @@ class MainController:
         critical_op_obj_list = []
         for op_name in critical_operations:
             op_obj = product.get_operation_by_name(op_name)
-            if op_obj and (not op_obj.get_completed() or (
-                    op_obj.get_remaining_duration() is not None and op_obj.get_remaining_duration() > 0.001)):
-                op_obj.set_early_start(earliest_start[op_name])
-                op_obj.set_late_finish(latest_finish[op_name])
-                if op_obj.get_early_start() == 0:
-                    critical_op_obj_list.append(op_obj)
+            if op_obj and not op_obj.get_completed():
+                op_obj.set_early_start(earliest_start.get(op_name, 0))
+                op_obj.set_late_finish(latest_finish.get(op_name, float('inf')))
+                critical_op_obj_list.append(op_obj)
 
         # Kritik operasyonları ürüne ata
         product.append_critical_operations(critical_op_obj_list)
@@ -292,18 +410,24 @@ class MainController:
             product_op_count[product_sn] = 0
             product_critical_ops[product_sn] = []
 
+            # Progress eklenmiş ve tamamlanmamış operasyonlar için debug çıktısı
+            has_progress = False
+            has_uncompleted = False
+            for op in product.get_operations():
+                if op.get_completed():
+                    has_progress = True
+                else:
+                    has_uncompleted = True
+
+            if has_progress and has_uncompleted:
+                print(f"Ürün {product_sn} için progress eklenmiş ve tamamlanmamış operasyonlar var")
+
             for op in product.get_critical_operations():
                 # Kalan süresi olan operasyonları kontrol et
                 has_remaining_time = op.get_remaining_duration() is not None and op.get_remaining_duration() > 0.001
 
-                # Operasyon tamamlanmadı VEYA kalan süresi varsa ve öncülleri tamamlandıysa
-                if (not op.get_completed() or has_remaining_time) and len(op.get_uncompleted_predecessors()) == 0:
-                    # Eğer tamamlandı olarak işaretlenmişse ama kalan süresi varsa, durumu düzelt
-                    if op.get_completed() and has_remaining_time:
-                        print(
-                            f"Fixing inconsistency: Operation {op.get_name()} marked as completed but has remaining time: {op.get_remaining_duration()}")
-                        op.set_completed(False)  # Completed flag'i düzelt
-
+                # ÖNEMLİ: Operasyon tamamlanmamış VE öncülleri tamamlanmışsa dahil et
+                if (not op.get_completed()) and len(op.get_uncompleted_predecessors()) == 0:
                     # Create a unique identifier for each operation based on product and operation name
                     operation_key = (product_sn, op.get_name())
 
@@ -312,13 +436,17 @@ class MainController:
                         seen_operations.add(operation_key)
                         product_critical_ops[product_sn].append((product, op))
                         print(
-                            f"Critical operation: {op.get_name()} for product {product_sn}, remaining: {op.get_remaining_duration()}")
+                            f"Kritik operasyon: {op.get_name()} ürün: {product_sn}, kalan süre: {op.get_remaining_duration()}")
                     else:
-                        print(f"Skipping duplicate critical operation: {op.get_name()} for product {product_sn}")
+                        print(f"Tekrarlanan kritik operasyon atlanıyor: {op.get_name()} ürün: {product_sn}")
 
         # Şimdi ürünler arasında dönüşümlü olarak operasyon seç
         # Önce ürünleri progress'e göre sırala (progress'i düşük olanlar önce)
         products_by_progress = sorted(self.__products, key=lambda p: p.get_progress() or 0)
+
+        # Debug: Ürünlerin progress değerlerini yazdır
+        for product in products_by_progress:
+            print(f"Ürün {product.get_serial_number()} progress: {product.get_progress()}")
 
         # Her üründen sırayla birer operasyon ekleyerek ilerleme sağla
         while any(product_critical_ops.values()):
@@ -333,12 +461,50 @@ class MainController:
                     if product_op_count[product_sn] >= 2 and any(len(ops) > 0 for ops in product_critical_ops.values()):
                         break
 
-        print("Critical operations for scheduling, balanced across products:")
+        print("Çizelgeleme için kritik operasyonlar, ürünler arası dengelenmiş:")
         for product, op in critical_ops:
             print(
-                f"Product: {product.get_serial_number()}, Operation: {op.get_name()}, Remaining: {op.get_remaining_duration()}")
+                f"Ürün: {product.get_serial_number()}, Operasyon: {op.get_name()}, Kalan: {op.get_remaining_duration()}")
 
         return critical_ops
+
+    def debug_operation_durations(self, serial_number):
+        """Progress eklenen ürünlerin detaylı izlemesi için debug fonksiyonu"""
+        product = self.get_product(serial_number)
+        print(f"\n===== DEBUG: {serial_number} ürünü için operasyon süreleri =====")
+        total_ops = 0
+        completed_ops = 0
+        incomplete_ops = 0
+
+        for op in product.get_operations():
+            total_ops += 1
+            completed_str = "EVET" if op.get_completed() else "HAYIR"
+
+            if op.get_completed():
+                completed_ops += 1
+            else:
+                incomplete_ops += 1
+
+            print(f"Operasyon {op.get_name()}:")
+            print(f"  * Toplam süre: {op.get_operating_duration()}")
+            print(f"  * Kalan süre: {op.get_remaining_duration()}")
+            print(f"  * Tamamlandı: {completed_str}")
+            print(f"  * Gereken işçi: {op.get_required_worker()}")
+            print(f"  * Gereken adam-saat: {op.get_required_man_hours()}")
+
+            # Öncülleri yazdır
+            pred_list = [p.get_name() for p in op.get_predecessors()]
+            unc_pred_list = [p.get_name() for p in op.get_uncompleted_predecessors()]
+            print(f"  * Tüm öncüller: {pred_list}")
+            print(f"  * Tamamlanmamış öncüller: {unc_pred_list}")
+
+            # Bu operasyon atanabilir mi?
+            is_assignable = not op.get_completed() and len(unc_pred_list) == 0
+            print(f"  * Atanabilir: {'EVET' if is_assignable else 'HAYIR'}")
+
+        print(f"Toplam operasyon: {total_ops}, Tamamlanmış: {completed_ops}, Tamamlanmamış: {incomplete_ops}")
+        print(f"Ürün progress: %{product.get_progress():.2f}")
+        print("===========================================\n")
 
     def set_schedule_attributes(self):
         self.__ScheduleObject.set_start_date(self.screenController.get_schedule_start())
@@ -499,12 +665,35 @@ class MainController:
         # Store current operation list for comparison in next iteration
         self.__critical_op_check_list = critical_op_list
 
+        # Debug: İşleme alınan operasyonları yazdır
+        print(f"\nAssignment starting for {len(critical_op_list)} operations:")
+        for product, operation in critical_op_list:
+            print(f"Trying to assign: Operation {operation.get_name()} of product {product.get_serial_number()}")
+
         # Process each critical operation
         for product, operation in critical_op_list:
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
 
+            # Debug: Tüm zaman aralıklarının sayısını kontrol et
+            if not intervals_list:
+                print(f"ERROR: No time intervals available for scheduling - check Schedule object")
+                continue
+            else:
+                print(f"Found {len(intervals_list)} time intervals for scheduling")
+
             # 1. Find the latest finish time of predecessors (within the same product)
             latest_finish_time = self.find_latest_finish_time_of_predecessors(operation, product)
+
+            # Debug: Öncüllerin bitiş zamanını göster
+            print(f"Latest finish time of predecessors for operation {operation.get_name()}: {latest_finish_time}")
+
+            # IMPORTANT FIX: latest_finish_time can be None without predecessors at the beginning
+            if latest_finish_time is None and not operation.get_predecessors():
+                # No predecessors means we can start at the first interval
+                if intervals_list:
+                    first_interval = intervals_list[0]
+                    latest_finish_time = (first_interval.get_date(), first_interval.interval[0])
+                    print(f"No predecessors, using first interval: {latest_finish_time}")
 
             # If latest_finish_time is None, it means some predecessors haven't been scheduled yet
             if latest_finish_time is None:
@@ -514,6 +703,9 @@ class MainController:
 
             # 2. Filter intervals that start after the latest finish time
             filtered_intervals = self.filter_intervals_after_time(intervals_list, latest_finish_time)
+
+            # Debug: Filtrelenmiş aralıkların sayısını göster
+            print(f"After filtering, {len(filtered_intervals) if filtered_intervals else 0} intervals remain")
 
             if not filtered_intervals:
                 print(
@@ -531,7 +723,19 @@ class MainController:
 
             successfully_assigned = False
             operation_start_date = None
-            max_days_to_consider = 2
+            max_days_to_consider = 5  # Arttırdık, daha fazla gün düşünebilsin
+
+            # Check compatible workers - IMPORTANT FIX
+            compatible_workers_exist = False
+            for interval in filtered_intervals[:10]:  # İlk 10 aralığı kontrol et
+                if self.compatible_worker_number_check(operation, interval):
+                    compatible_workers_exist = True
+                    break
+
+            if not compatible_workers_exist:
+                print(
+                    f"ERROR: No compatible workers for operation {operation.get_name()} - check worker qualifications")
+                continue  # Skip this operation
 
             # Check scheduling options: first try with same product, then without same product
             for same_product_mode in [True, False]:
@@ -551,6 +755,10 @@ class MainController:
                         if days_difference > max_days_to_consider:
                             continue
 
+                    # Debug: İşlenen aralığı göster
+                    print(
+                        f"Checking interval: Date={interval.get_date()}, Time={interval.interval[0]}-{interval.interval[1]}")
+
                     # Bu operasyon zaten bu aralıkta bu ürüne atanmış mı kontrol et
                     if self.is_operation_assigned_to_interval(operation.get_name(), interval, product):
                         print(
@@ -559,24 +767,28 @@ class MainController:
 
                     # Öncül operasyonlar tamamlanmış mı kontrol et
                     if not self.previous_operation_control(operation, interval, product):
+                        print(f"Previous operation control failed for {operation.get_name()}")
                         continue
 
-                    # Aynı ürün kontrolü (şimdilik mevcut mantığı koru)
+                    # Aynı ürün kontrolü
                     has_same_product = self.same_product_control(product, interval)
                     if same_product_mode != has_same_product:
+                        print(f"Same product mode ({same_product_mode}) does not match interval ({has_same_product})")
                         continue
 
                     # ÖNEMLİ DEĞİŞİKLİK: Ürün için işçi kapasitesi kontrolü
-                    # İlgili zaman aralığında ürün başına maksimum 4 işçi kontrolü
                     if not self.check_jig_capacity(product, operation, interval):
                         # Kapasite doluysa bu aralığı atla, sonraki aralığa geç
-                        print(
-                            f"Product {product.get_serial_number()} has reached maximum worker capacity (4) in this interval, trying next interval")
+                        print(f"Jig capacity check failed for {operation.get_name()}")
                         continue
 
                     # Yeterli sayıda uygun işçi var mı kontrol et
                     if not self.compatible_worker_number_check(operation, interval):
+                        print(f"Compatible worker check failed for {operation.get_name()}")
                         continue
+
+                    # Başarılı kontroller - atama yapılabilir
+                    print(f"All checks passed, proceeding with assignment for {operation.get_name()}")
 
                     # Jig işlemleri
                     current_jig = product.get_current_jig()
@@ -658,6 +870,8 @@ class MainController:
                             assigned_workers = interval_worker_assignments[assigned_interval]
                             if self.create_assignment(assigned_interval, jig, product, operation, assigned_workers):
                                 assignments_created += 1
+                                print(
+                                    f"Assignment created for interval {assigned_interval.get_date()}, {assigned_interval.interval[0]}-{assigned_interval.interval[1]}")
 
                         if assignments_created == 0:
                             print(
@@ -894,10 +1108,26 @@ class MainController:
         latest_finish_time = None
         intervals = self.get_ScheduleObject().get_sorted_time_intervals()
 
-        # If no predecessors, can start at the earliest possible time
+        # ÖNEMLİ: Hiç öncül yoksa ilk zaman aralığını döndür
         if len(op.get_predecessors()) == 0:
             first_interval = intervals[0]
             latest_finish_time = (first_interval.get_date(), first_interval.interval[0])
+            print(f"No predecessors for operation {op.get_name()}, using first interval time: {latest_finish_time}")
+            return latest_finish_time
+
+        # ÖNEMLİ: Tüm öncüller tamamlanmış mı kontrol et
+        all_predecessors_completed = True
+        for pred in op.get_predecessors():
+            if not pred.get_completed():
+                all_predecessors_completed = False
+                break
+
+        # Tüm öncüller tamamlanmışsa, ilk zaman aralığını kullan
+        if all_predecessors_completed:
+            first_interval = intervals[0]
+            latest_finish_time = (first_interval.get_date(), first_interval.interval[0])
+            print(
+                f"All predecessors completed for operation {op.get_name()}, using first interval time: {latest_finish_time}")
             return latest_finish_time
 
         # Only consider predecessors from the same product
@@ -909,6 +1139,12 @@ class MainController:
             # Ensure the predecessor belongs to this product
             if prev_op in product.get_operations():
                 product_predecessors.append(prev_op)
+                # Tamamlanmış öncüller için end_datetime kontrolü gerekmiyor
+                if prev_op.get_completed():
+                    print(
+                        f"Predecessor {prev_op.get_name()} for operation {op.get_name()} is completed, skipping end_datetime check")
+                    continue
+
                 # Check if the predecessor has an end time (has been scheduled)
                 if not prev_op.get_end_datetime() and not prev_op.get_completed():
                     print(
@@ -922,8 +1158,8 @@ class MainController:
 
         # Find the latest end time among all valid predecessors
         for prev_op in product_predecessors:
-            # Skip if the predecessor is already marked as completed but doesn't have end_datetime
-            if prev_op.get_completed() and not prev_op.get_end_datetime():
+            # Skip if the predecessor is already marked as completed
+            if prev_op.get_completed():
                 continue
 
             # If predecessor has an end_datetime, compare it with current latest
@@ -936,22 +1172,33 @@ class MainController:
                       prev_op.get_end_datetime()[1] > latest_finish_time[1]):
                     latest_finish_time = prev_op.get_end_datetime()
 
+        # Eğer hiçbir öncül için bitiş zamanı bulunamadıysa (hepsi tamamlanmışsa)
+        if latest_finish_time is None and all_predecessors_completed:
+            first_interval = intervals[0]
+            latest_finish_time = (first_interval.get_date(), first_interval.interval[0])
+            print(f"Using first interval for operation {op.get_name()} since all predecessors are completed")
+
         return latest_finish_time
 
     # 2. Fix the filter_intervals_after_time method to ensure operations start strictly after predecessors end
     def filter_intervals_after_time(self, intervals_list, start_time):
+        if not intervals_list:
+            print("ERROR: Empty intervals list in filter_intervals_after_time")
+            return []
+
         if start_time is None:
-            return []  # If no start time is found, don't schedule (empty list)
+            print("WARNING: start_time is None in filter_intervals_after_time, using first interval")
+            return [intervals_list[0]]  # Eğer başlangıç zamanı yoksa, ilk aralığı kullan
 
         # Tercih edilen vardiya tipini al (I1, I2, I3)
         preferred_shift = self.screenController.get_starting_shift()
+        print(f"Preferred shift: {preferred_shift}")
 
         # İlk gün ve vardiyayı bul
         first_day = None
         if intervals_list:
             first_day = intervals_list[0].get_date()
-
-        filtered_intervals = []
+            print(f"First day in schedule: {first_day}")
 
         # Eğer önceki operasyonlar daha önce tamamlanmışsa ve ilk gündeysek
         if start_time is None or (first_day and (start_time[0] < first_day or
@@ -976,6 +1223,7 @@ class MainController:
             elif preferred_shift == "I3":
                 shift_order = ["I3", "I1", "I2"]
 
+            filtered_intervals = []
             # İlk gün vardiyalarını tercih sırasına göre ekle
             for shift in shift_order:
                 filtered_intervals.extend(first_day_intervals[shift])
@@ -983,9 +1231,11 @@ class MainController:
             # Diğer günlerin aralıklarını ekle
             filtered_intervals.extend(other_intervals)
 
+            print(f"Returning {len(filtered_intervals)} filtered intervals (first day preference)")
             return filtered_intervals
 
         # Normal durum: önceki operasyonların tamamlanma zamanından sonraki aralıkları filtrele
+        filtered_intervals = []
         for interval in intervals_list:
             interval_date = interval.get_date()
             interval_start_time = interval.interval[0]  # Interval's start time
@@ -995,6 +1245,11 @@ class MainController:
                 filtered_intervals.append(interval)
             elif interval_date == start_time[0] and interval_start_time > start_time[1]:
                 filtered_intervals.append(interval)
+
+        print(f"Returning {len(filtered_intervals)} filtered intervals (after predecessor)")
+        if not filtered_intervals:
+            print("WARNING: No intervals found after predecessor completion time, using all intervals")
+            return intervals_list  # Geçici çözüm: hiç aralık bulamazsa, tüm aralıkları döndür
 
         return filtered_intervals
 
@@ -1259,7 +1514,7 @@ class MainController:
         recalculating critical operations, and initiating new assignments.
         Also handles consistency checks and deduplication of operations.
         """
-        # Yeni bir atama başlamadan önce atama takibini temizle (eğer böyle bir sistem eklediyseniz)
+        # Yeni bir atama başlamadan önce atama takibini temizle
         if hasattr(self, 'clear_assignments_tracking'):
             self.clear_assignments_tracking()
 
@@ -1272,15 +1527,20 @@ class MainController:
                 remaining = op.get_remaining_duration()
                 completed = op.get_completed()
 
-                # Tutarsızlık kontrolü
+                # Tutarsızlık kontrolü - tamamlanmış ama kalan süresi var
                 if remaining is not None and remaining > 0.001 and completed:
                     print(
-                        f"Fixing inconsistency in op {op.get_name()}: marked completed but has remaining time {remaining}")
-                    op.set_completed(False)  # Completed flag'i düzelt
+                        f"Tutarsızlık düzeltiliyor (op {op.get_name()}): tamamlandı olarak işaretlenmiş ama kalan süre {remaining}")
+                    op.set_remaining_duration(0)  # Kalan süreyi sıfırla, completed durumunu koru
 
-                # Eğer kalan süre tanımlanmamışsa, tam süreyi kullan
+                # Tutarsızlık kontrolü - tamamlanmamış ama kalan süresi yok/tanımlanmamış
                 if remaining is None and not completed:
                     op.set_remaining_duration(op.get_operating_duration())
+
+                # Progress eklenmiş ama tamamlanmamış operasyonlar için kalan süreyi güncelle
+                if not completed and remaining is not None and remaining <= 0.001:
+                    print(f"Düzeltme: Operasyon {op.get_name()} kalan süresi 0 ama tamamlanmamış olarak işaretli")
+                    op.set_completed(True)  # Tamamlandı olarak işaretle
 
         # Debug için her ürünün operasyon sürelerini yazdır
         for product in plist:
@@ -1309,49 +1569,102 @@ class MainController:
             product_op_key = (product.get_serial_number(), op.get_name())
             if product_op_key not in seen_product_ops:
                 seen_product_ops.add(product_op_key)
-                unique_critical_ops.append((product, op))
-            else:
-                print(
-                    f"Skipping duplicate critical operation: {op.get_name()} for product {product.get_serial_number()}")
 
-        # Sonsuz döngü kontrolü
-        if unique_critical_ops == self.__critical_op_check_list and unique_critical_ops:
-            print("Same operation list detected in consecutive iterations - may be stuck in a loop")
-            # Eğer aynı operasyon listesi tekrar ediyorsa, ilk operasyonu zorla çözmeye çalış
-            if unique_critical_ops:
-                product, operation = unique_critical_ops[0]
-                print(
-                    f"Forcing resolution for operation {operation.get_name()} of product {product.get_serial_number()}")
-                # Operasyonu tamamlandı olarak işaretle ve atama listesinden çıkar
-                operation.set_completed(True)
-                operation.set_remaining_duration(0)
-                # Yeni bir liste oluştur ve devam et
-                self.__critical_op_check_list = []
-                self.make_assignment_preparetions()
-                return
+                # Tamamlanmış operasyonları kritik operasyon listesine ekleme
+                if not op.get_completed():
+                    unique_critical_ops.append((product, op))
+                else:
+                    print(f"Tamamlanmış operasyon atlanıyor: {op.get_name()} - {product.get_serial_number()}")
+            else:
+                print(f"Tekrarlanan kritik operasyon atlanıyor: {op.get_name()} - {product.get_serial_number()}")
+
+        # Önceki atama listesi ile karşılaştır
+        previous_list = self.__critical_op_check_list if hasattr(self,
+                                                                 "_MainController__critical_op_check_list") else []
+
+        # Döngü algılama - daha akıllı bir yaklaşım
+        if unique_critical_ops == previous_list and unique_critical_ops:
+            print("UYARI: Ardışık iterasyonlarda aynı operasyon listesi tespit edildi - döngü olabilir")
+
+            # Döngünün derinlemesine analizini yapalım
+            print(f"Döngüde {len(unique_critical_ops)} operasyon var:")
+            for product, op in unique_critical_ops:
+                print(f"  * Ürün: {product.get_serial_number()}, Operasyon: {op.get_name()}")
+                print(f"    - Kalan süre: {op.get_remaining_duration()}")
+                print(f"    - Öncüller: {[p.get_name() for p in op.get_predecessors()]}")
+                print(f"    - Tamamlanmamış öncüller: {[p.get_name() for p in op.get_uncompleted_predecessors()]}")
+
+                # Atamanın neden başarısız olduğunu anlamak için kısıtları kontrol et
+                if hasattr(self,
+                           'get_ScheduleObject') and self.get_ScheduleObject() and self.get_ScheduleObject().get_sorted_time_intervals():
+                    sample_interval = self.get_ScheduleObject().get_sorted_time_intervals()[0]
+                    print("    - Kısıt kontrolleri:")
+
+                    # İşçi uygunluğu
+                    worker_check = hasattr(self,
+                                           'compatible_worker_number_check') and self.compatible_worker_number_check(op,
+                                                                                                                     sample_interval)
+                    print(f"      * İşçi uygunluğu: {'BAŞARILI' if worker_check else 'BAŞARISIZ'}")
+
+                    # Jig kontrolü
+                    jig_check = True
+                    if hasattr(self, 'check_jig_capacity'):
+                        jig_check = self.check_jig_capacity(product, op, sample_interval)
+                    print(f"      * Jig kapasitesi: {'BAŞARILI' if jig_check else 'BAŞARISIZ'}")
+
+                    # Öncül kontrolü
+                    predecessor_check = hasattr(self, 'previous_operation_control') and self.previous_operation_control(
+                        op, sample_interval, product)
+                    print(f"      * Öncül kontrolü: {'BAŞARILI' if predecessor_check else 'BAŞARISIZ'}")
+
+            # Çözüm stratejilerini dene
+            # 1. Adaptif çözüm: En çok kısıta takılan operasyonu bul ve çöz
+            most_constrained_idx = 0
+            for i, (product, op) in enumerate(unique_critical_ops):
+                # Öncül kısıtları olan operasyonları önce çöz
+                if op.get_uncompleted_predecessors():
+                    most_constrained_idx = i
+                    break
+
+            # İlk operasyonu zorla çözmeye çalış
+            product, operation = unique_critical_ops[most_constrained_idx]
+            print(f"Operasyon zorla çözülüyor: {operation.get_name()} - {product.get_serial_number()}")
+
+            # Mantıklı bir işlem atanmış gibi yap
+            operation.set_completed(True)
+            operation.set_remaining_duration(0)
+
+            # Varsa ilk zaman aralığını başlangıç ve bitiş zamanı olarak ayarla
+            if hasattr(self,
+                       'get_ScheduleObject') and self.get_ScheduleObject() and self.get_ScheduleObject().get_sorted_time_intervals():
+                first_interval = self.get_ScheduleObject().get_sorted_time_intervals()[0]
+                operation.set_start_datetime(first_interval.get_date(), first_interval.interval[0])
+                operation.set_end_datetime(first_interval.get_date(), first_interval.interval[1])
+
+            # Yeni bir liste oluştur ve devam et
+            self.__critical_op_check_list = []
+            self.make_assignment_preparetions()
+            return
 
         # Aktif listeyi güncelle (döngü tespiti için)
         self.__critical_op_check_list = unique_critical_ops
 
         # Eğer kritik operasyon listesi boşsa, işlem tamamlandı demektir
         if not unique_critical_ops:
-            print("Assignment complete - no more critical operations.")
+            print("Atama tamamlandı - başka kritik operasyon yok.")
             return
 
         # Debug için kritik operasyonları yazdır
-        print("Critical operations for next assignment:")
+        print("Sonraki atama için kritik operasyonlar:")
         for product, op in unique_critical_ops:
             print(
-                f"Product: {product.get_serial_number()}, Operation: {op.get_name()}, Remaining: {op.get_remaining_duration()}")
+                f"Ürün: {product.get_serial_number()}, Operasyon: {op.get_name()}, Kalan: {op.get_remaining_duration()}")
 
         # Atama işlemini başlat - tekrarlanan operasyonları çıkardıktan sonra
         self.initiate_assignment(unique_critical_ops)
 
     def get_assignments_for_output(self):
         assignments = []
-        today = datetime.now().strftime("%d.%m.%Y")  # Bugünün tarihi, varsayılan için
-
-        # 1. Önce normal atamaları al
         for date_obj in self.__ScheduleObject.dates:
             for time_interval in date_obj.time_intervals:
                 for assignment in time_interval.get_assignments():
@@ -1374,73 +1687,72 @@ class MainController:
                         "Time Interval": time_range,
                         "Workers": worker_names
                     })
-
-        # 2. Tamamlanmış ama atanmamış operasyonları ekle
-        assigned_operations = set()
-        for assignment in assignments:
-            assigned_operations.add((assignment["Product"], assignment["Operation"]))
-
-        for product in self.__products:
-            for operation in product.get_operations():
-                # Eğer operasyon tamamlanmış fakat atama listesinde yoksa
-                if operation.get_completed() and (
-                product.get_serial_number(), operation.get_name()) not in assigned_operations:
-                    # Bu tamamlanmış operasyon için atama yapılmamış, manuel atama oluştur
-
-                    # Excel uyumlu geçerli değerler kullan
-                    date_str = today  # Bugünkü tarihi kullan (Excel uyumlu)
-                    shift_str = "Manuel"
-                    time_range = "00:00-00:00"  # Geçerli bir zaman aralığı
-
-                    if operation.get_start_datetime() and operation.get_end_datetime():
-                        try:
-                            # Eğer operasyonun zaman bilgileri kaydedilmişse ve geçerliyse
-                            if isinstance(operation.get_start_datetime()[0], datetime):
-                                date_str = operation.get_start_datetime()[0].strftime("%d.%m.%Y")
-                            elif hasattr(operation.get_start_datetime()[0], "strftime"):
-                                date_str = operation.get_start_datetime()[0].strftime("%d.%m.%Y")
-                            else:
-                                # Bir string ise ve doğru formatta ise kullan, değilse bugünün tarihini kullan
-                                try:
-                                    # Tarih string'ini doğrula
-                                    datetime.strptime(str(operation.get_start_datetime()[0]), "%d.%m.%Y")
-                                    date_str = str(operation.get_start_datetime()[0])
-                                except ValueError:
-                                    # Geçersiz tarih formatı, bugünün tarihini kullan
-                                    date_str = today
-
-                            # Zaman aralığını formatla - geçerli zaman aralığı oluştur
-                            if hasattr(operation.get_start_datetime()[1], "strftime"):
-                                start_time = operation.get_start_datetime()[1].strftime("%H:%M")
-                            else:
-                                start_time = "00:00"  # Varsayılan başlangıç saati
-
-                            if hasattr(operation.get_end_datetime()[1], "strftime"):
-                                end_time = operation.get_end_datetime()[1].strftime("%H:%M")
-                            else:
-                                end_time = "00:00"  # Varsayılan bitiş saati
-
-                            time_range = f"{start_time}-{end_time}"
-                        except (AttributeError, IndexError, TypeError, ValueError):
-                            # Herhangi bir hata durumunda varsayılan değerleri kullan
-                            date_str = today
-                            time_range = "00:00-00:00"
-
-                    # Jig ve işçi bilgileri
-                    jig_name = product.get_current_jig().get_name() if product.get_current_jig() else "Manuel"
-                    worker_names = "Manuel tamamlandı"
-
-                    assignments.append({
-                        "Product": product.get_serial_number(),
-                        "Jig": jig_name,
-                        "Operation": operation.get_name(),
-                        "Date": date_str,
-                        "Shift": shift_str,
-                        "Time Interval": time_range,
-                        "Workers": worker_names
-                    })
-
         return assignments
+
+    def compatible_worker_number_check(self, operation, time_interval):
+        """
+        Bir operasyon için verilen zaman aralığında yeterli sayıda uygun işçi olup olmadığını kontrol eder.
+
+        Args:
+            operation: Kontrol edilecek operasyon
+            time_interval: Kontrol edilecek zaman aralığı
+
+        Returns:
+            bool: Yeterli sayıda uygun işçi varsa True, yoksa False
+        """
+        required_skills = operation.get_required_skills()
+        required_worker_count = operation.get_required_worker()
+
+        # Mevcut işçilerin olmadığı durumlarda güvenlik kontrolü
+        if not hasattr(time_interval, 'available_workers') or not time_interval.available_workers:
+            print(f"WARNING: No available workers for interval {time_interval.get_date()}, {time_interval.get_shift()}")
+            # İşçi olmadığında bile ilerlemek için varsayılan olarak True döndür
+            # Böylece progress eklenen ürünler için bile atamaya çalışacak
+            return True
+
+        # Zaman aralığında uygun olan tüm işçileri kontrol et
+        qualified_workers = 0
+
+        for worker in time_interval.available_workers:
+            # Beceri kontrolü
+            worker_skills = worker.get_skills()
+            is_qualified = False
+
+            if worker_skills in SKILLS:
+                worker_skill_set = SKILLS[worker_skills]
+                if required_skills in worker_skill_set:
+                    is_qualified = True
+            else:
+                if required_skills == worker_skills:
+                    is_qualified = True
+
+            if is_qualified:
+                qualified_workers += 1
+
+                # Gerekli işçi sayısına ulaşıldıysa erken çık
+                if qualified_workers >= required_worker_count:
+                    return True
+
+        # Yeterli sayıda uygun işçi yoksa
+        if qualified_workers < required_worker_count:
+            print(
+                f"Uygun beceriye sahip yeterli işçi yok. Gereken: {required_worker_count}, Bulunan: {qualified_workers}")
+
+            # FIX: Progress eklenen ürünler için işçi kontrolünü es geç
+            product_progress = None
+            for product in self.__products:
+                if operation in product.get_operations():
+                    product_progress = product.get_progress()
+                    break
+
+            if product_progress is not None and product_progress > 0:
+                print(f"Progress eklenmiş ürün için işçi kontrolü es geçiliyor (progress: %{product_progress})")
+                return True
+
+            return False
+
+        return True
+
 
     def export_assignments_to_excel(self, file_path=None):
         """

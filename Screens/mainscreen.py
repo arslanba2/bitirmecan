@@ -670,7 +670,26 @@ class MainWindow(tk.Tk):
         # Çıktı verme kısmısı
         assignments = self.mainController.get_assignments_for_output()
 
-        if assignments:
+        # ÖNEMLİ: Eğer atama yoksa hata göster
+        if not assignments:
+            messagebox.showwarning("Uyarı", "Hiç atama yapılmadı veya atamalar çıktıya eklenemedi!")
+            print("DİKKAT: Atama listesi boş! Algoritmada veya çıktı oluşturmada bir sorun olabilir.")
+
+            # Ürünlerin durumunu yazdır
+            for product in self.mainController.get_product_list():
+                sn = product.get_serial_number()
+                print(f"Ürün {sn} durumu:")
+                progress = product.get_progress() or 0
+                print(f"  Progress: %{progress:.2f}")
+
+                completed_ops = sum(1 for op in product.get_operations() if op.get_completed())
+                total_ops = len(product.get_operations())
+                print(f"  Tamamlanmış operasyonlar: {completed_ops}/{total_ops}")
+
+                # Tamamlanmamış operasyonları yazdır
+                incomplete_ops = [op.get_name() for op in product.get_operations() if not op.get_completed()]
+                print(f"  Tamamlanmamış operasyonlar: {incomplete_ops}")
+        else:
             # Atamalar başarılıysa atama sonuç penceresini göster
             assignment_window = AssignmentOutputWindow(assignments)
 
