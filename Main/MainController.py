@@ -384,8 +384,16 @@ class MainController:
                 op_obj.set_late_finish(latest_finish.get(op_name, float('inf')))
                 critical_op_obj_list.append(op_obj)
 
-        # Kritik operasyonları ürüne ata
-        product.append_critical_operations(critical_op_obj_list)
+        # Öncülleri tamamlanmamış operasyonları filtrele
+        filtered_critical_ops = []
+        for op in critical_op_obj_list:
+            if len(op.get_uncompleted_predecessors()) == 0:
+                filtered_critical_ops.append(op)
+            else:
+                print(f"Removing {op.get_name()} from critical path - has uncompleted predecessors")
+
+        # Filtrelenmiş listeyi atayın
+        product.append_critical_operations(filtered_critical_ops)
 
     def sort_operations_by_duration(self):
         for product in self.__products:
@@ -398,75 +406,87 @@ class MainController:
         self.__products = sorted_products
 
     def get_all_critical_operations(self):
+        """
+        Atama için uygun kritik operasyonları belirler.
+        Her ürün için sadece en öncü operasyonu seçer.
+        """
+        print("\n=== KRİTİK OPERASYON BELİRLEME ===")
         critical_ops = []
-        seen_operations = set()  # Instead of using just operation name, use (product_serial, op_name) tuples
-        product_op_count = {}  # Her ürün için atanan operasyon sayısını takip etmek için
 
-        # Önce her ürün için kritik operasyonları topla
-        product_critical_ops = {}
-
+        # Her ürün için atanmaya uygun operasyonları kontrol et
         for product in self.__products:
             product_sn = product.get_serial_number()
-            product_op_count[product_sn] = 0
-            product_critical_ops[product_sn] = []
+            print(f"\nÜrün {product_sn} için uygun operasyonlar kontrol ediliyor:")
 
-            # Progress eklenmiş ve tamamlanmamış operasyonlar için debug çıktısı
-            has_progress = False
-            has_uncompleted = False
-            for op in product.get_operations():
+            # 1. Bu ürünün tüm operasyonlarını topla
+            all_operations = product.get_operations()
+
+            # 2. Minimum öncül sayısı ile operasyonları tespit et
+            min_predecessor_count = float('inf')
+            operations_by_predecessor_count = {}
+
+            for op in all_operations:
                 if op.get_completed():
-                    has_progress = True
-                else:
-                    has_uncompleted = True
+                    continue  # Tamamlanmış operasyonları atla
 
-            if has_progress and has_uncompleted:
-                print(f"Ürün {product_sn} için progress eklenmiş ve tamamlanmamış operasyonlar var")
+                # Tamamlanmamış öncül sayısını say
+                uncompleted_pred_count = len([pred for pred in op.get_predecessors() if not pred.get_completed()])
 
-            for op in product.get_critical_operations():
-                # Kalan süresi olan operasyonları kontrol et
-                has_remaining_time = op.get_remaining_duration() is not None and op.get_remaining_duration() > 0.001
+                if uncompleted_pred_count > 0:
+                    print(f"  - Operasyon {op.get_name()}: {uncompleted_pred_count} tamamlanmamış öncül var - atanamaz")
+                    continue  # Tamamlanmamış öncülü olan operasyonları atla
 
-                # ÖNEMLİ: Operasyon tamamlanmamış VE öncülleri tamamlanmışsa dahil et
-                if (not op.get_completed()) and len(op.get_uncompleted_predecessors()) == 0:
-                    # Create a unique identifier for each operation based on product and operation name
-                    operation_key = (product_sn, op.get_name())
+                # Toplam öncül sayısını gruplayarak sakla
+                pred_count = len(op.get_predecessors())
+                if pred_count not in operations_by_predecessor_count:
+                    operations_by_predecessor_count[pred_count] = []
+                operations_by_predecessor_count[pred_count].append(op)
 
-                    # Aynı ürün+operasyon çifti daha önce eklenmiş mi kontrol et
-                    if operation_key not in seen_operations:
-                        seen_operations.add(operation_key)
-                        product_critical_ops[product_sn].append((product, op))
-                        print(
-                            f"Kritik operasyon: {op.get_name()} ürün: {product_sn}, kalan süre: {op.get_remaining_duration()}")
-                    else:
-                        print(f"Tekrarlanan kritik operasyon atlanıyor: {op.get_name()} ürün: {product_sn}")
+                # Minimum öncül sayısını güncelle
+                min_predecessor_count = min(min_predecessor_count, pred_count)
 
-        # Şimdi ürünler arasında dönüşümlü olarak operasyon seç
-        # Önce ürünleri progress'e göre sırala (progress'i düşük olanlar önce)
-        products_by_progress = sorted(self.__products, key=lambda p: p.get_progress() or 0)
+            # 3. Eğer atanabilir operasyon yoksa, bu ürünü atla
+            if min_predecessor_count == float('inf'):
+                print(f"  ! Ürün {product_sn} için atanabilir operasyon yok (hepsi tamamlanmış olabilir)")
+                continue
 
-        # Debug: Ürünlerin progress değerlerini yazdır
-        for product in products_by_progress:
-            print(f"Ürün {product.get_serial_number()} progress: {product.get_progress()}")
+            # 4. Sadece en az öncülü olan operasyonları seç
+            candidate_ops = operations_by_predecessor_count.get(min_predecessor_count, [])
 
-        # Her üründen sırayla birer operasyon ekleyerek ilerleme sağla
-        while any(product_critical_ops.values()):
-            for product in products_by_progress:
-                product_sn = product.get_serial_number()
-                if product_critical_ops[product_sn]:
-                    # Bu üründen bir operasyon al ve ana listeye ekle
-                    critical_ops.append(product_critical_ops[product_sn].pop(0))
-                    product_op_count[product_sn] += 1
+            # 5. Eğer operasyon adları sayısal ise, numaraya göre sırala (en küçük önce)
+            if candidate_ops:
+                candidate_ops.sort(key=lambda op: int(op.get_name()) if op.get_name().isdigit() else float('inf'))
 
-                    # Eğer bir üründen yeterince operasyon eklediyse ara
-                    if product_op_count[product_sn] >= 2 and any(len(ops) > 0 for ops in product_critical_ops.values()):
-                        break
-
-        print("Çizelgeleme için kritik operasyonlar, ürünler arası dengelenmiş:")
-        for product, op in critical_ops:
-            print(
-                f"Ürün: {product.get_serial_number()}, Operasyon: {op.get_name()}, Kalan: {op.get_remaining_duration()}")
+                # En küçük numaralı operasyonu seç
+                selected_op = candidate_ops[0]
+                critical_ops.append((product, selected_op))
+                print(
+                    f"Ürün {product_sn} için seçilen operasyon: {selected_op.get_name()} (Öncül sayısı: {min_predecessor_count})")
 
         return critical_ops
+
+    def _calculate_precedence_depth(self, operation, visited=None):
+        """Bir operasyonun öncüllük derinliğini hesaplar (DAG derinliği)"""
+        if visited is None:
+            visited = set()
+
+        # Döngüsel bağımlılıkları önle
+        if operation.get_name() in visited:
+            return 0
+
+        visited.add(operation.get_name())
+
+        # Eğer öncül yoksa, derinlik 0'dır
+        if not operation.get_predecessors():
+            return 0
+
+        # Derinlik, tüm öncüllerin maksimum derinliği + 1'dir
+        max_pred_depth = 0
+        for pred in operation.get_predecessors():
+            pred_depth = self._calculate_precedence_depth(pred, visited.copy())
+            max_pred_depth = max(max_pred_depth, pred_depth)
+
+        return max_pred_depth + 1
 
     def debug_operation_durations(self, serial_number):
         """Progress eklenen ürünlerin detaylı izlemesi için debug fonksiyonu"""
@@ -581,68 +601,23 @@ class MainController:
                 time_interval.available_workers = available_workers
 
     def previous_operation_control(self, operation, time_interval, product=None):
-        """
-        Checks if an operation can be scheduled in the given time interval.
-        Verifies that all predecessors are completed and not running in the same interval.
-        Prevents assigning the same operation multiple times in the same interval.
+        """Operasyonun atanabilir olup olmadığını kontrol eder"""
 
-        Args:
-            operation: The operation to be scheduled
-            time_interval: The time interval to check
-            product: The product this operation belongs to (added parameter)
-
-        Returns:
-            True if the operation can be scheduled, False otherwise
-        """
-        # If product wasn't passed, get it from the operation's context
-        # This maintains compatibility with existing code
+        # Ürünü belirle
         if product is None:
-            # Find the product that contains this operation
             for p in self.__products:
                 if operation in p.get_operations():
                     product = p
                     break
 
-        if product is None:
-            print(f"Warning: Could not determine product for operation {operation.get_name()}")
-            return False
-
-        # Check if this operation is already assigned to this interval for this specific product
-        if self.is_operation_assigned_to_interval(operation.get_name(), time_interval, product):
-            print(
-                f"Operation {operation.get_name()} for product {product.get_serial_number()} already assigned to this interval in previous_operation_control")
-            return False
-
-        # Check existing assignments in this interval
-        assignments = time_interval.get_assignments()
-        for assignment in assignments:
-            if len(assignment) >= 3:  # Make sure assignment has enough elements
-                assigned_jig, assigned_product, assigned_operation, assigned_workers = assignment
-
-                # Only check assignments for the SAME product
-                if assigned_product == product:
-                    # Check if the same operation is already assigned in this interval for this product
-                    if assigned_operation.get_name() == operation.get_name():
-                        print(
-                            f"Operation {operation.get_name()} for product {product.get_serial_number()} already has an existing assignment in this interval")
-                        return False
-
-                    # Check if any predecessor is running in this interval for this product
-                    for prev_op in operation.get_previous_operations():
-                        if assigned_operation.get_name() == prev_op.get_name():
-                            print(
-                                f"Predecessor {prev_op.get_name()} running in this interval for product {product.get_serial_number()}")
-                            return False  # Predecessor is running in this interval
-
-        # First check if all predecessors are completed for THIS product
+        # KESİN ve KATİ KONTROL: Tüm öncüller tamamlanmış mı?
+        all_predecessors_completed = True
         for pred in operation.get_predecessors():
-            # Make sure the predecessor belongs to the same product
-            if pred in product.get_operations() and not pred.get_completed():
-                print(
-                    f"Predecessor {pred.get_name()} not completed for operation {operation.get_name()} of product {product.get_serial_number()}")
-                return False  # Cannot schedule if any predecessor is not completed
+            if not pred.get_completed():
+                print(f"HATA: Öncül {pred.get_name()} tamamlanmadan {operation.get_name()} atanmaya çalışılıyor!")
+                return False
 
-        return True  # All checks passed, operation can be scheduled
+        return True  # Tüm kontroller başarılı
 
     def initiate_assignment(self, critical_op_list):
         """
@@ -653,6 +628,33 @@ class MainController:
         Args:
             critical_op_list: List of tuples (product, operation) to be scheduled
         """
+        # SIKI VE KESİN ÖNCÜLLÜK KONTROLÜ
+        verified_op_list = []
+        for product, operation in critical_op_list:
+            product_sn = product.get_serial_number()
+            op_name = operation.get_name()
+
+            # Tüm öncüllerin tamamlandığını kesin olarak doğrula
+            all_preds_completed = True
+            for pred in operation.get_predecessors():
+                if not pred.get_completed():
+                    print(
+                        f"[!] HATA: Operasyon {op_name} (Ürün {product_sn}) öncülü {pred.get_name()} tamamlanmamış - atlamalı!")
+                    all_preds_completed = False
+                    break
+
+            if all_preds_completed:
+                verified_op_list.append((product, operation))
+                print(f"✓ Operasyon {op_name} (Ürün {product_sn}) atamaya uygun - tüm öncüller tamamlanmış")
+
+        # Doğrulanmış listeyi kullanmaya devam et
+        if not verified_op_list:
+            print("[!] UYARI: Atamaya uygun operasyon kalmadı! İşlem sonlanıyor.")
+            return
+
+        # Orijinal listeyi güncelle
+        critical_op_list = verified_op_list
+
         # Compare to previous operation list - if the same, we're stuck
         if critical_op_list == self.__critical_op_check_list and critical_op_list:
             print("Same operation list detected - forcing resolution")
@@ -815,7 +817,7 @@ class MainController:
                         if days_difference > max_days_to_consider:
                             break
 
-                        # Bu operasyon zaten bu aralıkta atanmış mı
+                        # Bu operasyon zaten bu aralıkta atanmışsa
                         if self.is_operation_assigned_to_interval(operation.get_name(), current_interval, product):
                             # Sonraki aralığa geç
                             next_interval = self.get_next_interval(current_interval, filtered_intervals)
@@ -1553,6 +1555,9 @@ class MainController:
             self.remove_completed_predecessors(sn)
             self.set_critical_operations(sn)
 
+            # OPERASYONLARIN TAMAMLANMA SIRALAMASI KONTROLÜ
+            self.verify_operations_completion_order(product)
+
         # Operasyonları süreye göre sırala
         self.sort_operations_by_duration()
         # Ürünleri ilerleme durumuna göre sırala
@@ -1662,6 +1667,31 @@ class MainController:
 
         # Atama işlemini başlat - tekrarlanan operasyonları çıkardıktan sonra
         self.initiate_assignment(unique_critical_ops)
+
+    def verify_operations_completion_order(self, product):
+        """Operasyonların tamamlanma sıralamasını kontrol eder ve hataları raporlar"""
+        print(f"\n--- Ürün {product.get_serial_number()} İçin Operasyon Sıralaması Kontrolü ---")
+
+        # Operasyonları sırala (numaraya göre)
+        operations = sorted(product.get_operations(),
+                            key=lambda op: int(op.get_name()) if op.get_name().isdigit() else float('inf'))
+
+        # Öncül operasyonların durumunu kontrol et
+        for op in operations:
+            if op.get_completed():
+                # Tamamlanmış operasyonların tüm öncülleri de tamamlanmış olmalı
+                for pred in op.get_predecessors():
+                    if not pred.get_completed():
+                        print(
+                            f"HATA: Operasyon {op.get_name()} tamamlanmış fakat öncülü {pred.get_name()} tamamlanmamış!")
+            else:
+                print(f"Operasyon {op.get_name()}: Tamamlanmamış")
+                # Tamamlanmamış operasyonun tamamlanmamış öncüllerini listele
+                uncompleted_preds = [pred.get_name() for pred in op.get_predecessors() if not pred.get_completed()]
+                if uncompleted_preds:
+                    print(f"  - Tamamlanmamış öncüller: {uncompleted_preds}")
+
+        print("Kontrol tamamlandı.")
 
     def get_assignments_for_output(self):
         assignments = []
